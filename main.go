@@ -1,5 +1,10 @@
 package main
 
+// TODO: Unit testing
+// * net.Pipe is a pipe that fufills the net.Conn interface
+// * https://pkg.go.dev/github.com/pion/transport/vnet#section-readme but in early days so far
+// * https://pkg.go.dev/cunicu.li/gont/v2#section-readme is Linux specific
+
 import (
 	"container/heap"
 	"crypto/tls"
@@ -37,6 +42,13 @@ import (
 
 // TODO: first measure how long a NAT will leave a port open for, need a reply from the port, does stun do that?
 
+const (
+	successfulRequest = iota
+	retryRequest      = iota
+	rejectedRequest   = iota
+	fatalRequest      = iota
+)
+
 type host struct {
 	ip  net.IP
 	url url.URL
@@ -62,8 +74,9 @@ type connection struct {
 	uncrawledUrls []url.URL
 	crawledUrls   []url.URL
 	// keepAlive     time.Duration // Remember that the time we are interested in is really how long a NAT will leave a port open for
-	lastActivity time.Time
-	closed       bool
+	lastRequest     time.Time
+	connectAttempts int
+	connected       bool
 	// extra for experts would add some latency to figure out when it should be re-newed (moving average for latency of connection)
 }
 
@@ -74,9 +87,9 @@ func (h host) hostIPUrl() *url.URL {
 }
 
 // Define an interface that has a timestamp and time to next timestamp
-func (c connection) nextResponse() time.Time {
+func (c connection) nextRequest() time.Time {
 	// TODO: set keepAlive on connections
-	return c.lastActivity.Add(5 * time.Second)
+	return c.lastRequest.Add(5 * time.Second)
 }
 
 type connectionHeap []connection
@@ -84,8 +97,8 @@ type connectionHeap []connection
 func (h connectionHeap) Len() int      { return len(h) }
 func (h connectionHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
 func (h connectionHeap) Less(i, j int) bool {
-	timeI := h[i].nextResponse()
-	timeJ := h[j].nextResponse()
+	timeI := h[i].nextRequest()
+	timeJ := h[j].nextRequest()
 	return timeI.Before(timeJ)
 }
 func (h *connectionHeap) Push(x any) {
@@ -303,16 +316,19 @@ func crawlHttpHosts(wg *sync.WaitGroup, hosts <-chan request, results chan<- rep
 			break
 		}
 
+		cstatus := successfulRequest
 		status, urls, err := crawlHttpHost(r.client, r.host)
 		fmt.Printf("crawlHttpUrls: crawl on connection %v\n", r.connId)
 		if err != nil {
-			// TODO: This should send a reply with a failed status
-			// this should stop using http codes otherwise it needs to pretend, which is bad
-			continue
+			cstatus = fatalRequest
+		} else if status == 504 {
+			cstatus = retryRequest
+		} else if status >= 400 {
+			cstatus = rejectedRequest
 		}
 
 		select {
-		case results <- reply{connId: r.connId, status: status, host: r.host, urls: urls}:
+		case results <- reply{connId: r.connId, status: cstatus, host: r.host, urls: urls}:
 		case <-cancel:
 			return
 		}
@@ -320,7 +336,7 @@ func crawlHttpHosts(wg *sync.WaitGroup, hosts <-chan request, results chan<- rep
 	fmt.Println("sendHttpRequests: Finished Worker")
 }
 
-func measureMaxConnections() int {
+func MeasureMaxConnections(urls []string) int {
 	ncpus := runtime.NumCPU()
 	fmt.Printf("ncpus = %v\n", ncpus)
 	ncpus = 1
@@ -348,19 +364,9 @@ func measureMaxConnections() int {
 		go crawlHttpHosts(&httpWorkersCounter, crawlUrls, crawledUrls, stopC)
 	}
 
-	/* Send hostnames off to DNS workers to be resolved */
-	// TODO: read these rawUrls from a file
-	rawUrls := []string{
-		// "https://localhost:4443/",
-		"http://192.168.65.2:8080/",
-		"http://192.168.65.2:8080/ghost.html",
-		// "http://192.168.65.2:8080/",
-		// "http://192.168.65.2:8080/",
-		// "http://192.168.65.2:8080/index.html",
-	}
-
-	pendingConnections := make([]connection, 0, len(rawUrls))
-	activeConnections := make(connectionHeap, 0, len(rawUrls))
+	pendingConnections := make([]connection, 0)
+	failedConnections := make([]connection, 0)
+	activeConnections := make(connectionHeap, 0, len(urls))
 	heap.Init(&activeConnections)
 	// When all activeConnections have recieved a reply (crawledUrl)
 	// When connections get dropped
@@ -369,7 +375,10 @@ func measureMaxConnections() int {
 		var workDone int
 		var nReplied int
 
-		if len(activeConnections) == len(rawUrls) {
+		// TODO: Some hosts will fail to connect
+		// This forgets about unreplied connections
+		// TODO: need to timeout connections
+		if (len(activeConnections) + len(failedConnections)) == len(urls) {
 			for _, c := range activeConnections {
 				if len(c.crawledUrls) > 0 {
 					nReplied++
@@ -381,11 +390,11 @@ func measureMaxConnections() int {
 		}
 
 		/* Send and recieve DNS resolutions */
-		for more := true; more && rawUrlIdx < len(rawUrls); {
+		for more := true; more && rawUrlIdx < len(urls); {
 			fmt.Printf("Try pipe resolve host\n")
 			select {
-			case resolveUrls <- rawUrls[rawUrlIdx]:
-				fmt.Printf("Piped raw url %v\n", rawUrls[rawUrlIdx])
+			case resolveUrls <- urls[rawUrlIdx]:
+				fmt.Printf("Piped raw url %v\n", urls[rawUrlIdx])
 				workDone++
 				rawUrlIdx++
 			default:
@@ -410,9 +419,10 @@ func measureMaxConnections() int {
 					host:          h,
 					crawledUrls:   []url.URL{},
 					uncrawledUrls: []url.URL{h.url},
-					lastActivity:  time.Now(),
-					closed:        false,
+					lastRequest:   time.Now(),
+					connected:     false,
 				}
+				connId++
 				pendingConnections = append(pendingConnections, c)
 				workDone++
 			default:
@@ -430,8 +440,8 @@ func measureMaxConnections() int {
 
 			c := &activeConnections[0]
 			// TODO: get a better latency measure than 2
-			fmt.Printf("Time until next response on connection %v is %v\n", c.id, time.Until(c.nextResponse()).Seconds())
-			if time.Until(c.nextResponse()).Seconds() > 2 {
+			fmt.Printf("Time until next response on connection %v is %v\n", c.id, time.Until(c.nextRequest()).Seconds())
+			if time.Until(c.nextRequest()).Seconds() > 2 {
 				break
 			}
 
@@ -447,7 +457,7 @@ func measureMaxConnections() int {
 			case crawlUrls <- r:
 				fmt.Printf("Piped re-request on connection %v\n", c.id)
 				// TODO: What is the packet never arrives? This isn't going to do anything for 2 seconds.
-				c.lastActivity = time.Now()
+				c.lastRequest = time.Now()
 				heap.Fix(&activeConnections, 0)
 				workDone++
 			default:
@@ -462,15 +472,15 @@ func measureMaxConnections() int {
 				break
 			}
 
-			c := pendingConnections[0]
-			r := request{host: c.host, connId: connId, client: c.client}
+			c := &pendingConnections[0]
+			r := request{host: c.host, connId: c.id, client: c.client}
 			fmt.Printf("Try request host\n")
 			select {
 			case crawlUrls <- r:
 				fmt.Printf("Piped request on connection %v\n", connId)
+				c.connectAttempts++
 				activeConnections = append(activeConnections, pendingConnections[0])
 				pendingConnections = pendingConnections[1:]
-				connId++
 				workDone++
 			default:
 				more = false
@@ -498,12 +508,21 @@ func measureMaxConnections() int {
 				}
 
 				c := &activeConnections[i]
-				c.crawledUrls = append(c.crawledUrls, r.url)
-				c.closed = !(r.status >= 200 && r.status < 300)
-				if c.closed {
-					/* Allow http.Client resources to be reclaimed */
-					c.client = nil
+				c.connected = r.status != fatalRequest
+				fmt.Printf("Active connections returned with status %v\n", r.status)
+				if !c.connected {
+					heap.Remove(&activeConnections, i)
+					fmt.Printf("Active connections failed %v with %v attempts left\n", r.urls, 3-c.connectAttempts)
+					if c.connectAttempts < 3 {
+						pendingConnections = append(pendingConnections, *c)
+					} else {
+						c.client = nil
+						failedConnections = append(failedConnections, *c)
+					}
+					break
 				}
+				c.connectAttempts = 0
+				c.crawledUrls = append(c.crawledUrls, r.url)
 
 				// Remove url from uncraledUrls
 				j := slices.Index(c.uncrawledUrls, r.url)
@@ -518,7 +537,6 @@ func measureMaxConnections() int {
 						c.uncrawledUrls = append(c.uncrawledUrls, u)
 					}
 				}
-				c.lastActivity = time.Now()
 			default:
 				more = false
 			}
@@ -549,7 +567,7 @@ func measureMaxConnections() int {
 
 	nConns := 0
 	for _, c := range activeConnections {
-		if !c.closed {
+		if c.connected {
 			nConns++
 		}
 	}
@@ -558,7 +576,17 @@ func measureMaxConnections() int {
 
 func main() {
 	fmt.Println("Hello, World!")
-	nConns := measureMaxConnections()
+	// /* Send hostnames off to DNS workers to be resolved */
+	// // TODO: read these rawUrls from a file
+	rawUrls := []string{
+		// "https://localhost:4443/",
+		"http://192.168.65.2:8080/",
+		"http://192.168.65.2:8080/ghost.html",
+		// "http://192.168.65.2:8080/",
+		// "http://192.168.65.2:8080/",
+		// "http://192.168.65.2:8080/index.html",
+	}
+	nConns := MeasureMaxConnections(rawUrls)
 	fmt.Printf("nConns=%v\n", nConns)
 	fmt.Println("Bye, World!")
 }
