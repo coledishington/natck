@@ -45,6 +45,7 @@ func scrapUrl(client *http.Client, host *url.URL) ([]url.URL, error) {
 }
 
 func MeasureMaxConnections(urls []url.URL) int {
+	http.DefaultTransport.(*http.Transport).MaxIdleConns = 0
 	rUrls := make([]url.URL, 0)
 	client := http.Client{}
 	var i, r, a int

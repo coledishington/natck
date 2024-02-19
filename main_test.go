@@ -10,11 +10,30 @@ import (
 	"path"
 	"sync"
 	"testing"
+	"time"
 )
 
 type httpServerStats struct {
 	m           sync.Mutex
 	connections int
+}
+
+type httpTestServer struct {
+	testdata     string
+	port         int
+	replyLatency time.Duration
+}
+
+type HandlerWrapper struct {
+	latency time.Duration
+	wrapped http.Handler
+}
+
+func (h HandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	if h.latency != 0 {
+		time.Sleep(h.latency)
+	}
+	h.wrapped.ServeHTTP(res, req)
 }
 
 func tPath(p ...string) string {
@@ -55,16 +74,16 @@ func cpFile(t *testing.T, sPath, dPath string) {
 	}
 }
 
-func spawnHttpServer(t *testing.T, testdata string, port int) *httpServerStats {
+func spawnHttpServer(t *testing.T, tSrv *httpTestServer) *httpServerStats {
 	dir := t.TempDir()
 	t.Cleanup(func() {
 		err := os.RemoveAll(dir)
 		if err != nil {
-			t.Errorf("Failed to cleanup root directory of http server on port %v: %v", port, err)
+			t.Errorf("Failed to cleanup root directory of http server on port %v: %v", tSrv.port, err)
 		}
 	})
 
-	cpFile(t, testdata, path.Join(dir, "index.html"))
+	cpFile(t, tSrv.testdata, path.Join(dir, "index.html"))
 
 	var stats httpServerStats
 	statsCb := func(c net.Conn, s http.ConnState) {
@@ -75,22 +94,26 @@ func spawnHttpServer(t *testing.T, testdata string, port int) *httpServerStats {
 		}
 	}
 
+	handler := http.FileServer(http.Dir(dir))
 	srv := http.Server{
-		Addr:      fmt.Sprint(":", port),
-		Handler:   http.FileServer(http.Dir(dir)),
+		Addr:      fmt.Sprint(":", tSrv.port),
 		ConnState: statsCb,
+		Handler: HandlerWrapper{
+			latency: 1 * time.Millisecond,
+			wrapped: handler,
+		},
 	}
 	t.Cleanup(func() {
 		err := srv.Close()
 		if err != nil {
-			t.Errorf("Failed to close http server on port %v: %v", port, err)
+			t.Errorf("Failed to close http server on port %v: %v", tSrv.port, err)
 		}
 	})
 
 	go func() {
 		err := srv.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			t.Errorf("Unexpected shutdown of http server on port %v: %v", port, err)
+			t.Errorf("Unexpected shutdown of http server on port %v: %v", tSrv.port, err)
 		}
 	}()
 	return &stats
@@ -126,9 +149,9 @@ func TestMeasureMaxConnections(t *testing.T) {
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
 			httpStats := []*httpServerStats{
-				spawnHttpServer(t, tPath("no_links.html"), 8081),
-				spawnHttpServer(t, tPath("no_links.html"), 8082),
-				spawnHttpServer(t, tPath("no_links.html"), 8083),
+				spawnHttpServer(t, &httpTestServer{testdata: tPath("no_links.html"), port: 8081}),
+				spawnHttpServer(t, &httpTestServer{testdata: tPath("no_links.html"), port: 8082}),
+				spawnHttpServer(t, &httpTestServer{testdata: tPath("no_links.html"), port: 8083}),
 			}
 
 			urls := []url.URL{}
@@ -151,5 +174,40 @@ func TestMeasureMaxConnections(t *testing.T) {
 				httpStats[i].m.Unlock()
 			}
 		})
+	}
+}
+
+func TestMeasureMaxConnectionsBig(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
+	}
+
+	nConnections := 1000
+	httpStats := []*httpServerStats{}
+	for i := 8000; i < 8000+nConnections; i++ {
+		srv := &httpTestServer{testdata: tPath("no_links.html"), port: i, replyLatency: time.Millisecond}
+		httpStats = append(httpStats, spawnHttpServer(t, srv))
+	}
+
+	urls := []url.URL{}
+	for i := 8000; i < 8000+nConnections; i++ {
+		ln := fmt.Sprintf("http://localhost:%v/index.html", i)
+		u, err := url.Parse(ln)
+		if err != nil {
+			t.Fatal("Test url failed to parse", ln)
+		}
+		urls = append(urls, *u)
+	}
+
+	nConns := MeasureMaxConnections(urls)
+	if nConns != nConnections {
+		t.Error("expected (nConns=", 10, "), got (nConns=", nConns, ")")
+	}
+	for i := range httpStats {
+		httpStats[i].m.Lock()
+		if httpStats[i].connections != 1 {
+			t.Fatal("expected no more than one connection per http server, got", httpStats[i].connections)
+		}
+		httpStats[i].m.Unlock()
 	}
 }
