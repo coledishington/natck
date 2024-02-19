@@ -52,7 +52,9 @@ func spawnHttpServer(t *testing.T, testdata string, port int) {
 	dir := t.TempDir()
 	t.Cleanup(func() {
 		err := os.RemoveAll(dir)
-		t.Errorf("Failed to cleanup root directory of http server on port %v: %v", port, err)
+		if err != nil {
+			t.Errorf("Failed to cleanup root directory of http server on port %v: %v", port, err)
+		}
 	})
 
 	cpFile(t, testdata, path.Join(dir, "index.html"))
@@ -62,8 +64,9 @@ func spawnHttpServer(t *testing.T, testdata string, port int) {
 	}
 	t.Cleanup(func() {
 		err := srv.Close()
-		t.Errorf("Failed to close http server on port %v: %v", port, err)
-
+		if err != nil {
+			t.Errorf("Failed to close http server on port %v: %v", port, err)
+		}
 	})
 
 	go func() {
