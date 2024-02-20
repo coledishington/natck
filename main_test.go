@@ -19,9 +19,11 @@ type httpServerStats struct {
 }
 
 type httpTestServer struct {
+	server       *http.Server
 	testdata     string
 	port         int
 	replyLatency time.Duration
+	stats        httpServerStats
 }
 
 type HandlerWrapper struct {
@@ -74,7 +76,7 @@ func cpFile(t *testing.T, sPath, dPath string) {
 	}
 }
 
-func spawnHttpServer(t *testing.T, tSrv *httpTestServer) *httpServerStats {
+func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	dir := t.TempDir()
 	t.Cleanup(func() {
 		err := os.RemoveAll(dir)
@@ -85,7 +87,7 @@ func spawnHttpServer(t *testing.T, tSrv *httpTestServer) *httpServerStats {
 
 	cpFile(t, tSrv.testdata, path.Join(dir, "index.html"))
 
-	var stats httpServerStats
+	stats := &tSrv.stats
 	statsCb := func(c net.Conn, s http.ConnState) {
 		stats.m.Lock()
 		defer stats.m.Unlock()
@@ -95,7 +97,7 @@ func spawnHttpServer(t *testing.T, tSrv *httpTestServer) *httpServerStats {
 	}
 
 	handler := http.FileServer(http.Dir(dir))
-	srv := http.Server{
+	tSrv.server = &http.Server{
 		Addr:      fmt.Sprint(":", tSrv.port),
 		ConnState: statsCb,
 		Handler: HandlerWrapper{
@@ -104,19 +106,18 @@ func spawnHttpServer(t *testing.T, tSrv *httpTestServer) *httpServerStats {
 		},
 	}
 	t.Cleanup(func() {
-		err := srv.Close()
+		err := tSrv.server.Close()
 		if err != nil {
 			t.Errorf("Failed to close http server on port %v: %v", tSrv.port, err)
 		}
 	})
 
 	go func() {
-		err := srv.ListenAndServe()
+		err := tSrv.server.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
 			t.Errorf("Unexpected shutdown of http server on port %v: %v", tSrv.port, err)
 		}
 	}()
-	return &stats
 }
 
 func TestMeasureMaxConnections(t *testing.T) {
@@ -148,12 +149,6 @@ func TestMeasureMaxConnections(t *testing.T) {
 
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
-			httpStats := []*httpServerStats{
-				spawnHttpServer(t, &httpTestServer{testdata: tPath("no_links.html"), port: 8081}),
-				spawnHttpServer(t, &httpTestServer{testdata: tPath("no_links.html"), port: 8082}),
-				spawnHttpServer(t, &httpTestServer{testdata: tPath("no_links.html"), port: 8083}),
-			}
-
 			urls := []url.URL{}
 			for _, inUrl := range tc.inUrls {
 				u, err := url.Parse(inUrl)
@@ -162,16 +157,39 @@ func TestMeasureMaxConnections(t *testing.T) {
 				}
 				urls = append(urls, *u)
 			}
+
+			httpServers := []*httpTestServer{
+				{testdata: tPath("no_links.html"), port: 8081},
+				{testdata: tPath("no_links.html"), port: 8082},
+				{testdata: tPath("no_links.html"), port: 8083},
+			}
+			for i := range httpServers {
+				startHttpServer(t, httpServers[i])
+			}
+
 			nConns := MeasureMaxConnections(urls)
 			if nConns != tc.outNConns {
 				t.Error("expected (nConns=", tc.outNConns, "), got (nConns=", nConns, ")")
 			}
-			for i := range httpStats {
-				httpStats[i].m.Lock()
-				if httpStats[i].connections > 1 {
-					t.Error("expected no more than one connection per http server, got", httpStats[i].connections)
+
+			for i := range httpServers {
+				s := &httpServers[i].stats
+				s.m.Lock()
+				if s.connections > 1 {
+					t.Error("expected no more than one connection per http server, got ", s.connections)
 				}
-				httpStats[i].m.Unlock()
+				s.m.Unlock()
+			}
+
+			totalConnections := 0
+			for i := range httpServers {
+				s := &httpServers[i].stats
+				s.m.Lock()
+				totalConnections += s.connections
+				s.m.Unlock()
+			}
+			if totalConnections != tc.outNConns {
+				t.Errorf("expected the total number of new http server connections to be %d, got %d", tc.outNConns, totalConnections)
 			}
 		})
 	}
@@ -183,10 +201,11 @@ func TestMeasureMaxConnectionsBig(t *testing.T) {
 	}
 
 	nConnections := 1000
-	httpStats := []*httpServerStats{}
+	httpSrvs := []*httpTestServer{}
 	for i := 8000; i < 8000+nConnections; i++ {
 		srv := &httpTestServer{testdata: tPath("no_links.html"), port: i, replyLatency: time.Millisecond}
-		httpStats = append(httpStats, spawnHttpServer(t, srv))
+		startHttpServer(t, srv)
+		httpSrvs = append(httpSrvs, srv)
 	}
 
 	urls := []url.URL{}
@@ -203,11 +222,12 @@ func TestMeasureMaxConnectionsBig(t *testing.T) {
 	if nConns != nConnections {
 		t.Error("expected (nConns=", 10, "), got (nConns=", nConns, ")")
 	}
-	for i := range httpStats {
-		httpStats[i].m.Lock()
-		if httpStats[i].connections != 1 {
-			t.Fatal("expected no more than one connection per http server, got", httpStats[i].connections)
+	for i := range httpSrvs {
+		s := &httpSrvs[i].stats
+		s.m.Lock()
+		if s.connections != 1 {
+			t.Fatal("expected no more than one connection per http server, got", s.connections)
 		}
-		httpStats[i].m.Unlock()
+		s.m.Unlock()
 	}
 }
