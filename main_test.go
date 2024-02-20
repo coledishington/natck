@@ -134,6 +134,10 @@ func TestMeasureMaxConnections(t *testing.T) {
 			inPorts:   []int{8081, 8082, 8083},
 			outNConns: 3,
 		},
+		"repeat servers": {
+			inPorts:   []int{8081, 8081, 8082},
+			outNConns: 3,
+		},
 		"reachable and unreachable server": {
 			inPorts:   []int{8081, 8089},
 			outNConns: 1,
@@ -151,6 +155,11 @@ func TestMeasureMaxConnections(t *testing.T) {
 				urls = append(urls, *u)
 			}
 
+			portToNConns := make(map[int]int, 0)
+			for _, port := range tc.inPorts {
+				portToNConns[port]++
+			}
+
 			httpServers := []*httpTestServer{
 				{testdata: tPath("no_links.html"), port: 8081},
 				{testdata: tPath("no_links.html"), port: 8082},
@@ -162,16 +171,16 @@ func TestMeasureMaxConnections(t *testing.T) {
 
 			nConns := MeasureMaxConnections(urls)
 			if nConns != tc.outNConns {
-				t.Error("expected (nConns=", tc.outNConns, "), got (nConns=", nConns, ")")
+				t.Errorf("expected to measure %d client connections, got %d", tc.outNConns, nConns)
 			}
 
 			for i := range httpServers {
-				s := &httpServers[i].stats
-				s.m.Lock()
-				if s.connections > 1 {
-					t.Error("expected no more than one connection per http server, got ", s.connections)
+				s := httpServers[i]
+				s.stats.m.Lock()
+				if s.stats.connections != portToNConns[s.port] {
+					t.Errorf("expected server on port %d to get %d connections, got %d", s.port, portToNConns[s.port], s.stats.connections)
 				}
-				s.m.Unlock()
+				s.stats.m.Unlock()
 			}
 
 			totalConnections := 0
