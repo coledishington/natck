@@ -126,32 +126,25 @@ func TestMeasureMaxConnections(t *testing.T) {
 	}
 
 	testcases := map[string]struct {
-		inUrls           []string
+		inPorts          []int
 		outNConns        int
 		outRequestedUrls []string
 	}{
 		"few servers": {
-			inUrls: []string{
-				"http://127.0.0.1:8081/index.html",
-				"http://127.0.0.1:8082/index.html",
-				"http://127.0.0.1:8083/index.html",
-			},
+			inPorts:   []int{8081, 8082, 8083},
 			outNConns: 3,
 		},
 		"reachable and unreachable server": {
-			inUrls: []string{
-				"http://127.0.0.1:8081/index.html",
-				"http://127.0.0.1:8089/index.html",
-			},
+			inPorts:   []int{8081, 8089},
 			outNConns: 1,
 		},
 	}
 
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
-			urls := []url.URL{}
-			for _, inUrl := range tc.inUrls {
-				u, err := url.Parse(inUrl)
+			urls := make([]url.URL, 0)
+			for _, port := range tc.inPorts {
+				u, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%v/index.html", port))
 				if err != nil {
 					t.Fatal("Test url failed to parse")
 				}
