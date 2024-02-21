@@ -54,17 +54,10 @@ func scrapUrl(client *http.Client, host *url.URL) ([]url.URL, error) {
 func makeClient() *http.Client {
 	// Need a unique transport per http.Client to avoid re-using the same
 	// connections, otherwise the NAT count will be wrong.
-	defaultTransport := http.DefaultTransport.(*http.Transport)
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 0
 	client := http.Client{
-		Transport: &http.Transport{
-			Proxy:                 defaultTransport.Proxy,
-			DialContext:           defaultTransport.DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          0,
-			IdleConnTimeout:       defaultTransport.IdleConnTimeout,
-			TLSHandshakeTimeout:   defaultTransport.TLSHandshakeTimeout,
-			ExpectContinueTimeout: defaultTransport.ExpectContinueTimeout,
-		},
+		Transport: transport,
 	}
 	return &client
 }
