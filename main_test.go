@@ -101,7 +101,7 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 		Addr:      fmt.Sprint(":", tSrv.port),
 		ConnState: statsCb,
 		Handler: HandlerWrapper{
-			latency: 1 * time.Millisecond,
+			latency: tSrv.replyLatency,
 			wrapped: handler,
 		},
 	}
