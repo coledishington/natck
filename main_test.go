@@ -76,6 +76,12 @@ func cpFile(t *testing.T, sPath, dPath string) {
 	}
 }
 
+// startHttpServer Starts an http server, raising a test error if
+// any issue occurs. This server is setup over localhost, so in
+// effect the client and server are one hop from each other, with
+// no NAT between them. This can provide test coverage for
+// simple cases whilst avoiding platform-specific
+// network infrastructure.
 func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	dir := t.TempDir()
 	t.Cleanup(func() {
