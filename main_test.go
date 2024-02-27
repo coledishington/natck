@@ -103,6 +103,10 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	}
 
 	handler := http.FileServer(http.Dir(dir))
+
+	// Example Http keep-alive defaults, in seconds, are Apache(5),
+	// Cloudflare(900), GFE(610), LiteSpeed(5s), Microsoft-IIS(120),
+	// and nginx(75).
 	tSrv.server = &http.Server{
 		Addr:      fmt.Sprint(":", tSrv.port),
 		ConnState: statsCb,
@@ -110,6 +114,7 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 			latency: tSrv.replyLatency,
 			wrapped: handler,
 		},
+		IdleTimeout: 5 * time.Second,
 	}
 	t.Cleanup(func() {
 		err := tSrv.server.Close()
