@@ -116,6 +116,7 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 		},
 		IdleTimeout: 5 * time.Second,
 	}
+
 	t.Cleanup(func() {
 		err := tSrv.server.Close()
 		if err != nil {
@@ -137,9 +138,9 @@ func TestMeasureMaxConnections(t *testing.T) {
 	}
 
 	testcases := map[string]struct {
-		inPorts          []int
-		outNConns        int
-		outRequestedUrls []string
+		inPorts       []int
+		inPortLatency map[int]time.Duration
+		outNConns     int
 	}{
 		"few servers": {
 			inPorts:   []int{8081, 8082, 8083},
@@ -152,6 +153,11 @@ func TestMeasureMaxConnections(t *testing.T) {
 		"reachable and unreachable servers": {
 			inPorts:   []int{8081, 8089, 8090, 8082, 8091},
 			outNConns: 2,
+		},
+		"slow server": {
+			inPorts:       []int{8081, 8082},
+			inPortLatency: map[int]time.Duration{8082: time.Second},
+			outNConns:     2,
 		},
 	}
 
@@ -172,9 +178,9 @@ func TestMeasureMaxConnections(t *testing.T) {
 			}
 
 			httpServers := []*httpTestServer{
-				{testdata: tPath("no_links.html"), port: 8081},
-				{testdata: tPath("no_links.html"), port: 8082},
-				{testdata: tPath("no_links.html"), port: 8083},
+				{testdata: tPath("no_links.html"), port: 8081, replyLatency: tc.inPortLatency[8081]},
+				{testdata: tPath("no_links.html"), port: 8082, replyLatency: tc.inPortLatency[8082]},
+				{testdata: tPath("no_links.html"), port: 8083, replyLatency: tc.inPortLatency[8083]},
 			}
 			for i := range httpServers {
 				startHttpServer(t, httpServers[i])
