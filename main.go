@@ -60,8 +60,32 @@ func scrapUrl(client *http.Client, host *url.URL) ([]url.URL, error) {
 	}
 	defer resp.Body.Close()
 
+	// Parse urls from content
 	urls := Scrap(host, resp.Body)
-	return urls, nil
+
+	// Parse url from redirect
+	location, err := resp.Location()
+	if err != nil {
+		var found *url.URL
+		for i := range urls {
+			if urls[i] == *location {
+				found = &urls[i]
+				break
+			}
+		}
+		if found == nil {
+			urls = append(urls, *location)
+		}
+	}
+
+	// Find urls for the scraped host
+	hostUrls := []url.URL{}
+	for i := range urls {
+		if urls[i] != *host && urls[i].Host == host.Host {
+			hostUrls = append(hostUrls, urls[i])
+		}
+	}
+	return hostUrls, nil
 }
 
 func makeClient() *http.Client {
@@ -70,6 +94,10 @@ func makeClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConns = 0
 	client := http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			// Do not follow re-directs
+			return http.ErrUseLastResponse
+		},
 		Transport: transport,
 	}
 	return &client
@@ -91,14 +119,8 @@ func scrapConnection(r *roundtrip) {
 		return
 	}
 
-	// Find uri from same host, re-use original uri if no new uri
-	// was not scraped
-	for j := range sUrls {
-		sUrl := &sUrls[j]
-		if r.url.Host == sUrl.Host {
-			r.nextUrl = sUrl
-			break
-		}
+	if len(sUrls) > 0 {
+		r.nextUrl = &sUrls[0]
 	}
 }
 

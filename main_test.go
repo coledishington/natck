@@ -23,17 +23,25 @@ type httpTestServer struct {
 	testdata     string
 	port         int
 	replyLatency time.Duration
+	redirectCode int
+	redirectTo   string
 	stats        httpServerStats
 }
 
 type HandlerWrapper struct {
-	latency time.Duration
-	wrapped http.Handler
+	latency      time.Duration
+	redirectCode int
+	redirectTo   string
+	wrapped      http.Handler
 }
 
 func (h HandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	if h.latency != 0 {
 		time.Sleep(h.latency)
+	}
+	if h.redirectCode != 0 {
+		http.Redirect(res, req, h.redirectTo, h.redirectCode)
+		return
 	}
 	h.wrapped.ServeHTTP(res, req)
 }
@@ -111,8 +119,10 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 		Addr:      fmt.Sprint(":", tSrv.port),
 		ConnState: statsCb,
 		Handler: HandlerWrapper{
-			latency: tSrv.replyLatency,
-			wrapped: handler,
+			redirectCode: tSrv.redirectCode,
+			redirectTo:   tSrv.redirectTo,
+			latency:      tSrv.replyLatency,
+			wrapped:      handler,
 		},
 		IdleTimeout: 5 * time.Second,
 	}
@@ -132,15 +142,20 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	}()
 }
 
+func tUrl(port int) string {
+	return fmt.Sprintf("http://127.0.0.1:%v/index.html", port)
+}
+
 func TestMeasureMaxConnections(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
 	}
 
 	testcases := map[string]struct {
-		inPorts       []int
-		inPortLatency map[int]time.Duration
-		outNConns     int
+		inPorts        []int
+		inPortLatency  map[int]time.Duration
+		inPortRedirect map[int]int
+		outNConns      int
 	}{
 		"few servers": {
 			inPorts:   []int{8081, 8082, 8083},
@@ -159,13 +174,18 @@ func TestMeasureMaxConnections(t *testing.T) {
 			inPortLatency: map[int]time.Duration{8082: time.Second},
 			outNConns:     2,
 		},
+		"server redirect": {
+			inPorts:        []int{8081, 8082},
+			inPortRedirect: map[int]int{8082: 8083},
+			outNConns:      2,
+		},
 	}
 
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
 			urls := make([]url.URL, 0)
 			for _, port := range tc.inPorts {
-				u, err := url.Parse(fmt.Sprintf("http://127.0.0.1:%v/index.html", port))
+				u, err := url.Parse(tUrl(port))
 				if err != nil {
 					t.Fatal("Test url failed to parse")
 				}
@@ -177,11 +197,22 @@ func TestMeasureMaxConnections(t *testing.T) {
 				portToNConns[port]++
 			}
 
-			httpServers := []*httpTestServer{
-				{testdata: tPath("no_links.html"), port: 8081, replyLatency: tc.inPortLatency[8081]},
-				{testdata: tPath("no_links.html"), port: 8082, replyLatency: tc.inPortLatency[8082]},
-				{testdata: tPath("no_links.html"), port: 8083, replyLatency: tc.inPortLatency[8083]},
+			httpServers := []*httpTestServer{}
+			for _, p := range []int{8081, 8082, 8083} {
+				redirectCode := 0
+				redirectPort, exists := tc.inPortRedirect[p]
+				if exists {
+					redirectCode = http.StatusMovedPermanently
+				}
+				httpServers = append(httpServers, &httpTestServer{
+					testdata:     tPath("no_links.html"),
+					port:         p,
+					replyLatency: tc.inPortLatency[p],
+					redirectCode: redirectCode,
+					redirectTo:   tUrl(redirectPort),
+				})
 			}
+
 			for i := range httpServers {
 				startHttpServer(t, httpServers[i])
 			}
