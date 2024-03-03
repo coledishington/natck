@@ -69,7 +69,7 @@ func scrapUrl(client *http.Client, host *url.URL) ([]url.URL, error) {
 
 	// Parse url from redirect
 	location, err := resp.Location()
-	if err != nil {
+	if err == nil {
 		var found *url.URL
 		for i := range urls {
 			if urls[i] == *location {

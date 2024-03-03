@@ -40,6 +40,7 @@ func (h HandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		time.Sleep(h.latency)
 	}
 	if h.redirectCode != 0 {
+		res.Header()[http.CanonicalHeaderKey("Content-Type")] = nil
 		http.Redirect(res, req, h.redirectTo, h.redirectCode)
 		return
 	}
