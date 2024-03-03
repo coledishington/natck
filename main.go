@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -30,21 +32,23 @@ type connection struct {
 
 func readUrls(input io.Reader) ([]url.URL, error) {
 	urls := make([]url.URL, 0)
-	b := make([]byte, 0)
-	for {
-		_, err := input.Read(b)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			err = fmt.Errorf("failed to read url line: %w", err)
+	r := bufio.NewReaderSize(input, 160)
+	for more := true; more; {
+		line, rErr := r.ReadString('\n')
+		if rErr != nil && rErr != io.EOF {
+			err := fmt.Errorf("failed to read url line: %w", rErr)
 			return nil, err
+		}
+		more = rErr != io.EOF
+
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
 		}
 
-		u, err := url.Parse(string(b))
+		u, err := url.Parse(line)
 		if err != nil {
-			err = fmt.Errorf("failed to read url line: %w", err)
-			return nil, err
+			continue
 		}
 
 		urls = append(urls, *u)
