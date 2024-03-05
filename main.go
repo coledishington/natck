@@ -286,30 +286,12 @@ func MeasureMaxConnections(urls []url.URL) int {
 }
 
 func main() {
-	fmt.Println("Measure max connections! Please provide a path to a url list")
-	for {
-		var path string
-
-		_, err := fmt.Scanln(&path)
-		if err != nil {
-			fmt.Println("Failed to read input file path:", err)
-			break
-		}
-
-		f, err := os.Open(path)
-		if err != nil {
-			fmt.Printf("Could not open %v: %v", path, err)
-			break
-		}
-
-		urls, err := readUrls(f)
-		if err != nil {
-			fmt.Printf("Failed to read urls: %v: %v", path, err)
-			break
-		}
-
-		nConns := MeasureMaxConnections(urls)
-		fmt.Println("Max connections is", nConns)
-		fmt.Println()
+	urls, err := readUrls(os.Stdin)
+	if err != nil {
+		fmt.Printf("Failed to read urls from stdin: %v", err)
+		os.Exit(1)
 	}
+
+	nConns := MeasureMaxConnections(urls)
+	fmt.Println("Max connections are", nConns)
 }
