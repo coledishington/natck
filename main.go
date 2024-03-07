@@ -95,8 +95,11 @@ func scrapUrl(client *http.Client, host *url.URL) ([]url.URL, error) {
 func makeClient() *http.Client {
 	// Need a unique transport per http.Client to avoid re-using the same
 	// connections, otherwise the NAT count will be wrong.
+	// The transport should only have one connection that never times out.
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxIdleConns = 0
+	transport.IdleConnTimeout = 0
+	transport.MaxIdleConns = 1
+	transport.MaxConnsPerHost = 1
 	client := http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// Do not follow re-directs
