@@ -56,7 +56,7 @@ func readUrls(input io.Reader) ([]url.URL, error) {
 	return urls, nil
 }
 
-func scrapUrl(client *http.Client, host *url.URL) ([]url.URL, error) {
+func scrapUrl(client *http.Client, host *url.URL) ([]*url.URL, error) {
 	resp, err := client.Get(host.String())
 	if err != nil {
 		err = fmt.Errorf("failed get uri %v: %w", host.String(), err)
@@ -72,20 +72,20 @@ func scrapUrl(client *http.Client, host *url.URL) ([]url.URL, error) {
 	if err == nil {
 		var found *url.URL
 		for i := range urls {
-			if urls[i] == *location {
-				found = &urls[i]
+			if *urls[i] == *location {
+				found = urls[i]
 				break
 			}
 		}
 		if found == nil {
-			urls = append(urls, *location)
+			urls = append(urls, location)
 		}
 	}
 
 	// Find urls for the scraped host
-	hostUrls := []url.URL{}
+	hostUrls := []*url.URL{}
 	for i := range urls {
-		if urls[i] != *host && urls[i].Host == host.Host {
+		if *urls[i] != *host && urls[i].Host == host.Host {
 			hostUrls = append(hostUrls, urls[i])
 		}
 	}
@@ -127,7 +127,7 @@ func scrapConnection(r *roundtrip) {
 	}
 
 	if len(sUrls) > 0 {
-		r.nextUrl = &sUrls[0]
+		r.nextUrl = sUrls[0]
 	}
 }
 

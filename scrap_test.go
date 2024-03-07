@@ -26,7 +26,7 @@ func openFile(t *testing.T, path string) io.Reader {
 	return f
 }
 
-func urlsToStrings(urls []url.URL) []string {
+func urlsToStrings(urls []*url.URL) []string {
 	s := []string{}
 	for _, v := range urls {
 		s = append(s, v.String())

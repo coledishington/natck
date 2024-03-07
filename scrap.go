@@ -11,8 +11,8 @@ func urlCmp(u1, u2 *url.URL) bool {
 	return u1.Host == u2.Host && u1.Path == u2.Path
 }
 
-func Scrap(host *url.URL, body io.Reader) []url.URL {
-	urls := []url.URL{}
+func Scrap(host *url.URL, body io.Reader) []*url.URL {
+	urls := []*url.URL{}
 
 	for z := html.NewTokenizer(body); ; {
 		tt := z.Next()
@@ -45,19 +45,17 @@ func Scrap(host *url.URL, body io.Reader) []url.URL {
 				continue
 			}
 
-			var nUrl *url.URL
-			if aUrl.IsAbs() {
-				nUrl = aUrl
-			} else {
+			nUrl := aUrl
+			if !aUrl.IsAbs() {
 				// Handle relative links
-				absUrl := *host
-				absUrl.Path = aUrl.Path
-				nUrl = &absUrl
+				path := aUrl.Path
+				*nUrl = *host
+				nUrl.Path = path
 			}
 
 			found := false
 			for _, u := range urls {
-				found = urlCmp(nUrl, &u)
+				found = urlCmp(nUrl, u)
 				if found {
 					break
 				}
@@ -65,7 +63,7 @@ func Scrap(host *url.URL, body io.Reader) []url.URL {
 			if found {
 				continue
 			}
-			urls = append(urls, *nUrl)
+			urls = append(urls, nUrl)
 		}
 	}
 	return urls
