@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptrace"
+	"net/netip"
 	"net/url"
 	"os"
 	"runtime"
@@ -14,20 +17,52 @@ import (
 	"time"
 )
 
+type host struct {
+	ip        netip.Addr
+	hostnames []string
+}
+
 type roundtrip struct {
 	connId  uint
 	client  *http.Client
+	host    *host
 	url     *url.URL
 	nextUrl *url.URL
 }
 
 type connection struct {
 	id          uint
+	host        *host
 	client      *http.Client
 	url         *url.URL
 	nextUrl     *url.URL
 	lastRequest time.Time
 	lastReply   time.Time
+}
+
+func sliceContainsUrl(urls []*url.URL, needle *url.URL) bool {
+	return slices.ContainsFunc(urls, func(u *url.URL) bool {
+		return *u == *needle
+	})
+}
+
+func hostnameHasIPAddr(hostname string, needle netip.Addr) bool {
+	found := false
+	addrs, err := net.LookupIP(hostname)
+	if err != nil {
+		return found
+	}
+	for _, addrBytes := range addrs {
+		addr, ok := netip.AddrFromSlice(addrBytes)
+		if !ok {
+			continue
+		}
+		found = addr == needle
+		if found {
+			break
+		}
+	}
+	return found
 }
 
 func readUrls(input io.Reader) ([]url.URL, error) {
@@ -56,38 +91,69 @@ func readUrls(input io.Reader) ([]url.URL, error) {
 	return urls, nil
 }
 
-func scrapUrl(client *http.Client, host *url.URL) ([]*url.URL, error) {
-	resp, err := client.Get(host.String())
+func getUrl(client *http.Client, target *url.URL) (netip.Addr, *http.Response, error) {
+	remoteAddr := netip.IPv4Unspecified()
+	targetUrl := target.String()
+	req, err := http.NewRequest(http.MethodGet, targetUrl, nil)
 	if err != nil {
-		err = fmt.Errorf("failed get uri %v: %w", host.String(), err)
+		err = fmt.Errorf("failed get uri %v: %w", targetUrl, err)
+		return remoteAddr, nil, err
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		ConnectDone: func(network, addr string, err error) {
+			rAddr, err := netip.ParseAddr(addr)
+			if err != nil {
+				return
+			}
+			remoteAddr = rAddr
+		},
+	}))
+	resp, err := client.Do(req)
+	if err != nil {
+		err = fmt.Errorf("failed get uri %v: %w", targetUrl, err)
+		return remoteAddr, nil, err
+	}
+	return remoteAddr, resp, err
+}
+
+func scrapResponse(target *url.URL, resp *http.Response) []*url.URL {
+	// Parse urls from content
+	urls := Scrap(target, resp.Body)
+
+	// Add url from redirect if it belongs to the same server
+	location, err := resp.Location()
+	if err == nil && !sliceContainsUrl(urls, location) {
+		urls = append(urls, location)
+	}
+	return urls
+}
+
+func scrapHostUrl(client *http.Client, host *host, target *url.URL) ([]*url.URL, error) {
+	remoteIP, resp, err := getUrl(client, target)
+	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// Parse urls from content
-	urls := Scrap(host, resp.Body)
-
-	// Parse url from redirect
-	location, err := resp.Location()
-	if err == nil {
-		var found *url.URL
-		for i := range urls {
-			if *urls[i] == *location {
-				found = urls[i]
-				break
-			}
-		}
-		if found == nil {
-			urls = append(urls, location)
-		}
+	// Use the new IP if a new connection was made
+	if !remoteIP.IsUnspecified() {
+		host.ip = remoteIP
 	}
 
-	// Find urls for the scraped host
+	urls := scrapResponse(target, resp)
+
+	// Find urls matching the scraped host
 	hostUrls := []*url.URL{}
 	for i := range urls {
-		if *urls[i] != *host && urls[i].Host == host.Host {
-			hostUrls = append(hostUrls, urls[i])
+		u := urls[i]
+		if *u == *target {
+			continue
 		}
+		uHost := u.Hostname()
+		if !slices.Contains(host.hostnames, uHost) && hostnameHasIPAddr(uHost, host.ip) {
+			host.hostnames = append(host.hostnames, uHost)
+		}
+		hostUrls = append(hostUrls, urls[i])
 	}
 	return hostUrls, nil
 }
@@ -115,12 +181,13 @@ func makeConnection(h *url.URL) *connection {
 		client:  makeClient(),
 		url:     h,
 		nextUrl: h,
+		host:    &host{},
 	}
 	return c
 }
 
 func scrapConnection(r *roundtrip) {
-	sUrls, err := scrapUrl(r.client, r.url)
+	sUrls, err := scrapHostUrl(r.client, r.host, r.url)
 	if err != nil {
 		r.nextUrl = nil
 		return
@@ -203,7 +270,7 @@ func MeasureMaxConnections(urls []url.URL) int {
 			}
 
 			select {
-			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: c.url, nextUrl: c.nextUrl}:
+			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: c.url, nextUrl: c.nextUrl, host: c.host}:
 				c.lastRequest = time.Now()
 				activeConnsScraped++
 			default:
@@ -220,7 +287,7 @@ func MeasureMaxConnections(urls []url.URL) int {
 
 			c := pendingConns[0]
 			select {
-			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: c.url, nextUrl: c.nextUrl}:
+			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: c.url, nextUrl: c.nextUrl, host: c.host}:
 				pendingConns = pendingConns[1:]
 				pendingConnsScraped++
 			default:
@@ -243,7 +310,7 @@ func MeasureMaxConnections(urls []url.URL) int {
 					return r.connId == c.id
 				})
 				if i == -1 {
-					c := &connection{id: r.connId, client: r.client, url: r.url, nextUrl: r.nextUrl}
+					c := &connection{id: r.connId, client: r.client, url: r.url, nextUrl: r.nextUrl, host: r.host}
 					c.lastReply = time.Now()
 					if c.nextUrl == nil {
 						failedConns = append(failedConns, c)
