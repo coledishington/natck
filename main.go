@@ -23,21 +23,23 @@ type host struct {
 }
 
 type roundtrip struct {
-	connId  uint
-	client  *http.Client
-	host    *host
-	url     *url.URL
-	nextUrl *url.URL
+	connId      uint
+	client      *http.Client
+	host        *host
+	url         *url.URL
+	scrapedUrls []*url.URL
+	failed      bool
 }
 
 type connection struct {
-	id          uint
-	host        *host
-	client      *http.Client
-	url         *url.URL
-	nextUrl     *url.URL
-	lastRequest time.Time
-	lastReply   time.Time
+	id            uint
+	host          *host
+	client        *http.Client
+	url           *url.URL
+	uncrawledUrls []*url.URL
+	crawledUrls   []*url.URL
+	lastRequest   time.Time
+	lastReply     time.Time
 }
 
 func sliceContainsUrl(urls []*url.URL, needle *url.URL) bool {
@@ -96,7 +98,7 @@ func getUrl(client *http.Client, target *url.URL) (netip.Addr, *http.Response, e
 	targetUrl := target.String()
 	req, err := http.NewRequest(http.MethodGet, targetUrl, nil)
 	if err != nil {
-		err = fmt.Errorf("failed get uri %v: %w", targetUrl, err)
+		err = fmt.Errorf("failed to make request: %w", err)
 		return remoteAddr, nil, err
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
@@ -178,24 +180,19 @@ func makeClient() *http.Client {
 
 func makeConnection(h *url.URL) *connection {
 	c := &connection{
-		client:  makeClient(),
-		url:     h,
-		nextUrl: h,
-		host:    &host{},
+		client:        makeClient(),
+		url:           h,
+		uncrawledUrls: []*url.URL{h},
+		host:          &host{hostnames: []string{h.Hostname()}},
 	}
 	return c
 }
 
-func scrapConnection(r *roundtrip) {
+func scrapConnection(r *roundtrip) *roundtrip {
 	sUrls, err := scrapHostUrl(r.client, r.host, r.url)
-	if err != nil {
-		r.nextUrl = nil
-		return
-	}
-
-	if len(sUrls) > 0 {
-		r.nextUrl = sUrls[0]
-	}
+	r.failed = err != nil
+	r.scrapedUrls = sUrls
+	return r
 }
 
 func scrapConnections(wg *sync.WaitGroup, pendingScraps <-chan *roundtrip, scraped chan<- *roundtrip, cancel <-chan struct{}) {
@@ -222,9 +219,8 @@ func scrapConnections(wg *sync.WaitGroup, pendingScraps <-chan *roundtrip, scrap
 			break
 		}
 
-		scrapConnection(r)
 		select {
-		case scraped <- r:
+		case scraped <- scrapConnection(r):
 		case <-cancel:
 			return
 		}
@@ -269,8 +265,12 @@ func MeasureMaxConnections(urls []url.URL) int {
 				continue
 			}
 
+			target := c.url
+			if len(c.uncrawledUrls) > 0 {
+				target = c.uncrawledUrls[0]
+			}
 			select {
-			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: c.url, nextUrl: c.nextUrl, host: c.host}:
+			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}:
 				c.lastRequest = time.Now()
 				activeConnsScraped++
 			default:
@@ -286,8 +286,9 @@ func MeasureMaxConnections(urls []url.URL) int {
 			}
 
 			c := pendingConns[0]
+			target := c.uncrawledUrls[0]
 			select {
-			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: c.url, nextUrl: c.nextUrl, host: c.host}:
+			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}:
 				pendingConns = pendingConns[1:]
 				pendingConnsScraped++
 			default:
@@ -310,22 +311,42 @@ func MeasureMaxConnections(urls []url.URL) int {
 					return r.connId == c.id
 				})
 				if i == -1 {
-					c := &connection{id: r.connId, client: r.client, url: r.url, nextUrl: r.nextUrl, host: r.host}
+					c := &connection{
+						id: r.connId, client: r.client, url: r.url,
+						uncrawledUrls: r.scrapedUrls,
+						crawledUrls:   []*url.URL{r.url},
+						host:          r.host,
+					}
 					c.lastReply = time.Now()
-					if c.nextUrl == nil {
+					if r.failed {
 						failedConns = append(failedConns, c)
 					} else {
 						activeConns = append(activeConns, c)
 					}
 					break
 				}
-				if r.nextUrl == nil {
+				c := activeConns[i]
+				// Adjust uncrawled and crawled urls
+				j := slices.IndexFunc(c.uncrawledUrls, func(u *url.URL) bool {
+					return *u == *r.url
+				})
+				if j != -1 {
+					c.uncrawledUrls = slices.Delete(c.uncrawledUrls, j, j+1)
+				}
+				c.crawledUrls = append(c.crawledUrls, r.url)
+				// Add any new urls to the connection's uncrawled urls
+				for i := range r.scrapedUrls {
+					u := r.scrapedUrls[i]
+					if sliceContainsUrl(c.uncrawledUrls, u) || sliceContainsUrl(c.crawledUrls, u) {
+						continue
+					}
+					c.uncrawledUrls = append(c.uncrawledUrls, u)
+				}
+				c.crawledUrls = append(c.crawledUrls, r.url)
+				c.lastReply = time.Now()
+				if r.failed {
 					failedConns = append(failedConns, activeConns[i])
 					activeConns = slices.Delete(activeConns, i, i+1)
-				} else {
-					c := activeConns[i]
-					c.nextUrl = r.nextUrl
-					c.lastReply = time.Now()
 				}
 			default:
 				more = false
