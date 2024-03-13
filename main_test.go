@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -13,31 +14,59 @@ import (
 	"time"
 )
 
+type httpRequest struct {
+	client, server netip.AddrPort
+	method         string
+	path           string
+	received       time.Time
+}
+
 type httpServerStats struct {
 	m           sync.Mutex
 	connections int
+	requests    []*httpRequest
 }
 
 type httpTestServer struct {
 	server       *http.Server
 	testdata     string
-	port         int
+	listenAddr   netip.AddrPort
 	replyLatency time.Duration
 	redirectCode int
 	redirectTo   string
 	stats        httpServerStats
-}
-
-type HandlerWrapper struct {
-	latency      time.Duration
-	redirectCode int
-	redirectTo   string
 	wrapped      http.Handler
 }
 
-func (h HandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	if h.latency != 0 {
-		time.Sleep(h.latency)
+func (h *httpTestServer) addRequest(req *http.Request) error {
+	stats := &h.stats
+	stats.m.Lock()
+	defer stats.m.Unlock()
+
+	raddr, err := netip.ParseAddrPort(req.RemoteAddr)
+	if err != nil {
+		return err
+	}
+
+	stats.requests = append(stats.requests, &httpRequest{
+		client:   raddr,
+		server:   h.listenAddr,
+		method:   req.Method,
+		path:     req.URL.Path,
+		received: time.Now(),
+	})
+	return nil
+}
+
+func (h *httpTestServer) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	// Cannot call test.Fatal in server go routine, close server instead
+	if h.addRequest(req) != nil {
+		h.server.Close()
+		return
+	}
+
+	if h.replyLatency != 0 {
+		time.Sleep(h.replyLatency)
 	}
 	if h.redirectCode != 0 {
 		res.Header()[http.CanonicalHeaderKey("Content-Type")] = nil
@@ -47,9 +76,12 @@ func (h HandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	h.wrapped.ServeHTTP(res, req)
 }
 
-func tPath(p ...string) string {
-	p = append([]string{"testdata"}, p...)
-	return path.Join(p...)
+func parseAddrPort(t *testing.T, a string) netip.AddrPort {
+	addr, err := netip.ParseAddrPort(a)
+	if err != nil {
+		t.Fatal("ParseAddrPort failed:", err)
+	}
+	return addr
 }
 
 func cpFile(t *testing.T, sPath, dPath string) {
@@ -96,14 +128,14 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	t.Cleanup(func() {
 		err := os.RemoveAll(dir)
 		if err != nil {
-			t.Errorf("Failed to cleanup root directory of http server on port %v: %v", tSrv.port, err)
+			t.Errorf("Failed to cleanup root directory of http server listening on %v: %v", tSrv.listenAddr.String(), err)
 		}
 	})
 
 	cpFile(t, tSrv.testdata, path.Join(dir, "index.html"))
 
-	stats := &tSrv.stats
-	statsCb := func(c net.Conn, s http.ConnState) {
+	connStateCb := func(c net.Conn, s http.ConnState) {
+		stats := &tSrv.stats
 		stats.m.Lock()
 		defer stats.m.Unlock()
 		if s == http.StateNew {
@@ -111,40 +143,50 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 		}
 	}
 
-	handler := http.FileServer(http.Dir(dir))
+	tSrv.wrapped = http.FileServer(http.Dir(dir))
 
 	// Example Http keep-alive defaults, in seconds, are Apache(5),
 	// Cloudflare(900), GFE(610), LiteSpeed(5s), Microsoft-IIS(120),
 	// and nginx(75).
 	tSrv.server = &http.Server{
-		Addr:      fmt.Sprint(":", tSrv.port),
-		ConnState: statsCb,
-		Handler: HandlerWrapper{
-			redirectCode: tSrv.redirectCode,
-			redirectTo:   tSrv.redirectTo,
-			latency:      tSrv.replyLatency,
-			wrapped:      handler,
-		},
+		Addr:        tSrv.listenAddr.String(),
+		ConnState:   connStateCb,
+		Handler:     tSrv,
 		IdleTimeout: 5 * time.Second,
 	}
 
 	t.Cleanup(func() {
 		err := tSrv.server.Close()
 		if err != nil {
-			t.Errorf("Failed to close http server on port %v: %v", tSrv.port, err)
+			t.Errorf("Failed to close http server listening on %v: %v", tSrv.listenAddr.String(), err)
 		}
 	})
 
 	go func() {
 		err := tSrv.server.ListenAndServe()
 		if err != nil && err != http.ErrServerClosed {
-			t.Errorf("Unexpected shutdown of http server on port %v: %v", tSrv.port, err)
+			t.Errorf("Unexpected shutdown of http server listening on %v: %v", tSrv.listenAddr.String(), err)
 		}
 	}()
 }
 
-func tUrl(port int) string {
-	return fmt.Sprintf("http://127.0.0.1:%v/index.html", port)
+func tAddrPort(t *testing.T, port int) netip.AddrPort {
+	return parseAddrPort(t, fmt.Sprintf("127.0.0.1:%v", port))
+}
+
+func tPath(p ...string) string {
+	p = append([]string{"testdata"}, p...)
+	return path.Join(p...)
+}
+
+func tUrl(t *testing.T, port int) *url.URL {
+	addr := tAddrPort(t, port)
+	s := fmt.Sprintf("http://%v/index.html", addr.String())
+	u, err := url.Parse(s)
+	if err != nil {
+		t.Fatalf("Failed to parse url: %v", err)
+	}
+	return u
 }
 
 func TestMeasureMaxConnections(t *testing.T) {
@@ -186,11 +228,7 @@ func TestMeasureMaxConnections(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			urls := []*url.URL{}
 			for _, port := range tc.inPorts {
-				u, err := url.Parse(tUrl(port))
-				if err != nil {
-					t.Fatal("Test url failed to parse")
-				}
-				urls = append(urls, u)
+				urls = append(urls, tUrl(t, port))
 			}
 
 			portToNConns := make(map[int]int, 0)
@@ -207,10 +245,10 @@ func TestMeasureMaxConnections(t *testing.T) {
 				}
 				httpServers = append(httpServers, &httpTestServer{
 					testdata:     tPath("no_links.html"),
-					port:         p,
+					listenAddr:   tAddrPort(t, p),
 					replyLatency: tc.inPortLatency[p],
 					redirectCode: redirectCode,
-					redirectTo:   tUrl(redirectPort),
+					redirectTo:   tUrl(t, redirectPort).String(),
 				})
 			}
 
@@ -226,8 +264,10 @@ func TestMeasureMaxConnections(t *testing.T) {
 			for i := range httpServers {
 				s := httpServers[i]
 				s.stats.m.Lock()
-				if s.stats.connections != portToNConns[s.port] {
-					t.Errorf("expected server on port %d to get %d connections, got %d", s.port, portToNConns[s.port], s.stats.connections)
+				sPort := int(s.listenAddr.Port())
+				sConns := s.stats.connections
+				if s.stats.connections != portToNConns[sPort] {
+					t.Errorf("expected server listening on %v to get %d connections, got %d", s.listenAddr, portToNConns[sPort], sConns)
 				}
 				s.stats.m.Unlock()
 			}
@@ -254,7 +294,11 @@ func TestMeasureMaxConnectionsBig(t *testing.T) {
 	nConnections := 1000
 	httpSrvs := []*httpTestServer{}
 	for i := 8000; i < 8000+nConnections; i++ {
-		srv := &httpTestServer{testdata: tPath("no_links.html"), port: i, replyLatency: time.Millisecond}
+		srv := &httpTestServer{
+			testdata:     tPath("no_links.html"),
+			listenAddr:   tAddrPort(t, i),
+			replyLatency: time.Millisecond,
+		}
 		startHttpServer(t, srv)
 		httpSrvs = append(httpSrvs, srv)
 	}
@@ -281,4 +325,12 @@ func TestMeasureMaxConnectionsBig(t *testing.T) {
 		}
 		s.m.Unlock()
 	}
+}
+
+func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping TestMeasureMaxConnectionsCrawlingBehaviour in short mode due to re-request timeouts.")
+	}
+
+	nConns := MeasureMaxConnections(urls)
 }
