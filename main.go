@@ -67,8 +67,8 @@ func hostnameHasIPAddr(hostname string, needle netip.Addr) bool {
 	return found
 }
 
-func readUrls(input io.Reader) ([]url.URL, error) {
-	urls := make([]url.URL, 0)
+func readUrls(input io.Reader) ([]*url.URL, error) {
+	urls := make([]*url.URL, 0)
 	r := bufio.NewReaderSize(input, 160)
 	for more := true; more; {
 		line, rErr := r.ReadString('\n')
@@ -88,7 +88,7 @@ func readUrls(input io.Reader) ([]url.URL, error) {
 			continue
 		}
 
-		urls = append(urls, *u)
+		urls = append(urls, u)
 	}
 	return urls, nil
 }
@@ -227,7 +227,7 @@ func scrapConnections(wg *sync.WaitGroup, pendingScraps <-chan *roundtrip, scrap
 	}
 }
 
-func MeasureMaxConnections(urls []url.URL) int {
+func MeasureMaxConnections(urls []*url.URL) int {
 	nWorkers := 0
 	scrapRequest := make(chan *roundtrip)
 	scrapedReply := make(chan *roundtrip)
@@ -236,7 +236,7 @@ func MeasureMaxConnections(urls []url.URL) int {
 
 	pendingConns := make([]*connection, 0)
 	for i := range urls {
-		c := makeConnection(&urls[i])
+		c := makeConnection(urls[i])
 		c.id = uint(i)
 		pendingConns = append(pendingConns, c)
 	}

@@ -184,13 +184,13 @@ func TestMeasureMaxConnections(t *testing.T) {
 
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
-			urls := make([]url.URL, 0)
+			urls := []*url.URL{}
 			for _, port := range tc.inPorts {
 				u, err := url.Parse(tUrl(port))
 				if err != nil {
 					t.Fatal("Test url failed to parse")
 				}
-				urls = append(urls, *u)
+				urls = append(urls, u)
 			}
 
 			portToNConns := make(map[int]int, 0)
@@ -259,14 +259,14 @@ func TestMeasureMaxConnectionsBig(t *testing.T) {
 		httpSrvs = append(httpSrvs, srv)
 	}
 
-	urls := []url.URL{}
+	urls := []*url.URL{}
 	for i := 8000; i < 8000+nConnections; i++ {
 		ln := fmt.Sprintf("http://localhost:%v/index.html", i)
 		u, err := url.Parse(ln)
 		if err != nil {
 			t.Fatal("Test url failed to parse", ln)
 		}
-		urls = append(urls, *u)
+		urls = append(urls, u)
 	}
 
 	nConns := MeasureMaxConnections(urls)
