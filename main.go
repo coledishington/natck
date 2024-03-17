@@ -29,6 +29,8 @@ type roundtrip struct {
 	url         *url.URL
 	scrapedUrls []*url.URL
 	failed      bool
+	requestTs   time.Time
+	replyTs     time.Time
 }
 
 type connection struct {
@@ -45,6 +47,12 @@ type connection struct {
 func sliceContainsUrl(urls []*url.URL, needle *url.URL) bool {
 	return slices.ContainsFunc(urls, func(u *url.URL) bool {
 		return *u == *needle
+	})
+}
+
+func indexKeepAliveConnection(conns []*connection) int {
+	return slices.IndexFunc(conns, func(c *connection) bool {
+		return time.Since(c.lastReply) > 3500*time.Millisecond && time.Since(c.lastRequest) > 1000*time.Millisecond
 	})
 }
 
@@ -189,7 +197,9 @@ func makeConnection(h *url.URL) *connection {
 }
 
 func scrapConnection(r *roundtrip) *roundtrip {
+	r.requestTs = time.Now()
 	sUrls, err := scrapHostUrl(r.client, r.host, r.url)
+	r.replyTs = time.Now()
 	r.failed = err != nil
 	r.scrapedUrls = sUrls
 	return r
@@ -228,7 +238,6 @@ func scrapConnections(wg *sync.WaitGroup, pendingScraps <-chan *roundtrip, scrap
 }
 
 func MeasureMaxConnections(urls []*url.URL) int {
-	nWorkers := 0
 	scrapRequest := make(chan *roundtrip)
 	scrapedReply := make(chan *roundtrip)
 	stopScraping := make(chan struct{})
@@ -241,115 +250,107 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		pendingConns = append(pendingConns, c)
 	}
 
-	scrapersEstimate := min(len(urls), 2*runtime.NumCPU())
-	scrapersEstimate = max(scrapersEstimate, int(len(urls)/100))
-	for i := 0; i < scrapersEstimate; i++ {
+	nScrapers := min(len(urls), 2*runtime.NumCPU())
+	nScrapers = max(nScrapers, int(len(urls)/100))
+	for i := 0; i < nScrapers; i++ {
 		scapersCounter.Add(1)
 		go scrapConnections(&scapersCounter, scrapRequest, scrapedReply, stopScraping)
-		nWorkers += 1
 	}
+	maxNScrapers := len(urls)
 
+	keepAliveRequestsInWindow := 0
 	activeConns := make([]*connection, 0)
 	failedConns := make([]*connection, 0)
 	for {
-		anyFreeScrapers := true
-		activeConnsScraped := 0
-		/* Send off any new packets before http keep-alive or NAT mapping expires */
-		for i := range activeConns {
-			if !anyFreeScrapers {
-				break
-			}
+		var scrapRequestC chan<- *roundtrip = nil
+		timedOut := false
 
-			c := activeConns[i]
-			if time.Since(c.lastReply) < 3500*time.Millisecond || time.Since(c.lastRequest) < 1000*time.Millisecond {
-				continue
-			}
+		var c *connection
+		keepAliveIdx := indexKeepAliveConnection(activeConns)
+		keepAliveConnection := keepAliveIdx != -1
+		if keepAliveConnection {
+			// Prioritise existing connections to avoid http keep-alive
+			// or NAT mapping expires
+			c = activeConns[keepAliveIdx]
+		} else if len(pendingConns) > 0 {
+			// Create a new connection
+			c = pendingConns[0]
+		}
 
+		var request *roundtrip = nil
+		if c != nil {
+			scrapRequestC = scrapRequest
 			target := c.url
 			if len(c.uncrawledUrls) > 0 {
 				target = c.uncrawledUrls[0]
 			}
-			select {
-			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}:
-				c.lastRequest = time.Now()
-				activeConnsScraped++
-			default:
-				anyFreeScrapers = false
-			}
+			request = &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}
 		}
 
-		pendingConnsScraped := 0
-		/* Send off first packets of pending connections */
-		for {
-			if !anyFreeScrapers || len(pendingConns) == 0 {
+		select {
+		case <-time.After(50 * time.Millisecond):
+			timedOut = true
+		case scrapRequestC <- request:
+			if len(pendingConns) > 0 && pendingConns[0] == c {
+				pendingConns = pendingConns[1:]
+			}
+
+			// Track how many of the last 10 scraps were for an existing connection
+			if keepAliveConnection {
+				keepAliveRequestsInWindow = min(keepAliveRequestsInWindow+1, 10)
+			} else {
+				keepAliveRequestsInWindow = max(keepAliveRequestsInWindow-1, 0)
+			}
+
+			c.lastRequest = time.Now()
+		case reply, ok := <-scrapedReply:
+			if !ok {
+				return -1
+			}
+
+			i := slices.IndexFunc(activeConns, func(c *connection) bool {
+				return reply.connId == c.id
+			})
+			if i == -1 {
+				c := &connection{
+					id: reply.connId, client: reply.client, url: reply.url,
+					uncrawledUrls: reply.scrapedUrls,
+					crawledUrls:   []*url.URL{reply.url},
+					host:          reply.host,
+					lastRequest:   reply.requestTs,
+					lastReply:     reply.replyTs,
+				}
+				if reply.failed {
+					failedConns = append(failedConns, c)
+				} else {
+					activeConns = append(activeConns, c)
+				}
 				break
 			}
-
-			c := pendingConns[0]
-			target := c.uncrawledUrls[0]
-			select {
-			case scrapRequest <- &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}:
-				pendingConns = pendingConns[1:]
-				pendingConnsScraped++
-			default:
-				anyFreeScrapers = false
+			c := activeConns[i]
+			// Adjust uncrawled and crawled urls
+			j := slices.IndexFunc(c.uncrawledUrls, func(u *url.URL) bool {
+				return *u == *reply.url
+			})
+			if j != -1 {
+				c.uncrawledUrls = slices.Delete(c.uncrawledUrls, j, j+1)
 			}
-		}
-
-		scrapedReplies := 0
-		/* Collect completed connections */
-		for more := true; more; {
-			select {
-			case r, ok := <-scrapedReply:
-				if !ok {
-					more = false
-					break
+			// Add any new urls to the connection's uncrawled urls
+			for i := range reply.scrapedUrls {
+				u := reply.scrapedUrls[i]
+				if sliceContainsUrl(c.uncrawledUrls, u) || sliceContainsUrl(c.crawledUrls, u) {
+					continue
 				}
-
-				scrapedReplies++
-				i := slices.IndexFunc(activeConns, func(c *connection) bool {
-					return r.connId == c.id
-				})
-				if i == -1 {
-					c := &connection{
-						id: r.connId, client: r.client, url: r.url,
-						uncrawledUrls: r.scrapedUrls,
-						crawledUrls:   []*url.URL{r.url},
-						host:          r.host,
-					}
-					c.lastReply = time.Now()
-					if r.failed {
-						failedConns = append(failedConns, c)
-					} else {
-						activeConns = append(activeConns, c)
-					}
-					break
-				}
-				c := activeConns[i]
-				// Adjust uncrawled and crawled urls
-				j := slices.IndexFunc(c.uncrawledUrls, func(u *url.URL) bool {
-					return *u == *r.url
-				})
-				if j != -1 {
-					c.uncrawledUrls = slices.Delete(c.uncrawledUrls, j, j+1)
-				}
-				c.crawledUrls = append(c.crawledUrls, r.url)
-				// Add any new urls to the connection's uncrawled urls
-				for i := range r.scrapedUrls {
-					u := r.scrapedUrls[i]
-					if sliceContainsUrl(c.uncrawledUrls, u) || sliceContainsUrl(c.crawledUrls, u) {
-						continue
-					}
-					c.uncrawledUrls = append(c.uncrawledUrls, u)
-				}
-				c.crawledUrls = append(c.crawledUrls, r.url)
-				c.lastReply = time.Now()
-				if r.failed {
-					failedConns = append(failedConns, activeConns[i])
-					activeConns = slices.Delete(activeConns, i, i+1)
-				}
-			default:
-				more = false
+				c.uncrawledUrls = append(c.uncrawledUrls, u)
+			}
+			if !sliceContainsUrl(c.crawledUrls, reply.url) {
+				c.crawledUrls = append(c.crawledUrls, reply.url)
+			}
+			c.lastRequest = reply.requestTs
+			c.lastReply = reply.replyTs
+			if reply.failed {
+				failedConns = append(failedConns, activeConns[i])
+				activeConns = slices.Delete(activeConns, i, i+1)
 			}
 		}
 
@@ -357,15 +358,16 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			break
 		}
 
-		/* Avoid tightly looping */
-		if 8*activeConnsScraped > pendingConnsScraped {
-			for j := 0; j < 8*activeConnsScraped; j++ {
+		// Grow number of scrapers based on demand, connection upkeep should
+		// account a maximum of 10% of the requests.
+		if !timedOut && keepAliveRequestsInWindow > 1 && nScrapers < maxNScrapers {
+			nNewScrapers := min((keepAliveRequestsInWindow-1)*nScrapers, maxNScrapers-nScrapers)
+			for s := 0; s < nNewScrapers; s++ {
 				scapersCounter.Add(1)
 				go scrapConnections(&scapersCounter, scrapRequest, scrapedReply, stopScraping)
-				nWorkers += 1
+
 			}
-		} else if (activeConnsScraped + pendingConnsScraped + scrapedReplies) == 0 {
-			time.Sleep(100 * time.Millisecond)
+			nScrapers += nNewScrapers
 		}
 	}
 
