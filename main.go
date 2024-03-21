@@ -17,8 +17,13 @@ import (
 	"time"
 )
 
+type resolvedUrl struct {
+	url       *url.URL
+	addresses []netip.Addr
+}
+
 type host struct {
-	ip        netip.Addr
+	ip        netip.AddrPort
 	hostnames []string
 }
 
@@ -50,29 +55,18 @@ func sliceContainsUrl(urls []*url.URL, needle *url.URL) bool {
 	})
 }
 
+func indexConnectionByAddrs(conns []*connection, addrs []netip.Addr) int {
+	return slices.IndexFunc(conns, func(c *connection) bool {
+		return slices.ContainsFunc(addrs, func(addr netip.Addr) bool {
+			return c.host.ip.Addr() == addr
+		})
+	})
+}
+
 func indexKeepAliveConnection(conns []*connection) int {
 	return slices.IndexFunc(conns, func(c *connection) bool {
 		return time.Since(c.lastReply) > 3500*time.Millisecond && time.Since(c.lastRequest) > 1000*time.Millisecond
 	})
-}
-
-func hostnameHasIPAddr(hostname string, needle netip.Addr) bool {
-	found := false
-	addrs, err := net.LookupIP(hostname)
-	if err != nil {
-		return found
-	}
-	for _, addrBytes := range addrs {
-		addr, ok := netip.AddrFromSlice(addrBytes)
-		if !ok {
-			continue
-		}
-		found = addr == needle
-		if found {
-			break
-		}
-	}
-	return found
 }
 
 func readUrls(input io.Reader) ([]*url.URL, error) {
@@ -101,8 +95,8 @@ func readUrls(input io.Reader) ([]*url.URL, error) {
 	return urls, nil
 }
 
-func getUrl(client *http.Client, target *url.URL) (netip.Addr, *http.Response, error) {
-	remoteAddr := netip.IPv4Unspecified()
+func getUrl(client *http.Client, target *url.URL) (netip.AddrPort, *http.Response, error) {
+	remoteAddr := netip.AddrPortFrom(netip.IPv4Unspecified(), 0)
 	targetUrl := target.String()
 	req, err := http.NewRequest(http.MethodGet, targetUrl, nil)
 	if err != nil {
@@ -110,8 +104,8 @@ func getUrl(client *http.Client, target *url.URL) (netip.Addr, *http.Response, e
 		return remoteAddr, nil, err
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-		ConnectDone: func(network, addr string, err error) {
-			rAddr, err := netip.ParseAddr(addr)
+		ConnectDone: func(network, addr string, _ error) {
+			rAddr, err := netip.ParseAddrPort(addr)
 			if err != nil {
 				return
 			}
@@ -146,26 +140,11 @@ func scrapHostUrl(client *http.Client, host *host, target *url.URL) ([]*url.URL,
 	defer resp.Body.Close()
 
 	// Use the new IP if a new connection was made
-	if !remoteIP.IsUnspecified() {
+	if !remoteIP.Addr().IsUnspecified() {
 		host.ip = remoteIP
 	}
 
-	urls := scrapResponse(target, resp)
-
-	// Find urls matching the scraped host
-	hostUrls := []*url.URL{}
-	for i := range urls {
-		u := urls[i]
-		if *u == *target {
-			continue
-		}
-		uHost := u.Hostname()
-		if !slices.Contains(host.hostnames, uHost) && hostnameHasIPAddr(uHost, host.ip) {
-			host.hostnames = append(host.hostnames, uHost)
-		}
-		hostUrls = append(hostUrls, urls[i])
-	}
-	return hostUrls, nil
+	return scrapResponse(target, resp), nil
 }
 
 func makeClient() *http.Client {
@@ -194,6 +173,55 @@ func makeConnection(h *url.URL) *connection {
 		host:          &host{hostnames: []string{h.Hostname()}},
 	}
 	return c
+}
+
+func lookupAddr(h *url.URL) *resolvedUrl {
+	r := resolvedUrl{url: h}
+	addrs, err := net.LookupIP(r.url.Hostname())
+	if err != nil {
+		return &r
+	}
+
+	for i := range addrs {
+		addr, ok := netip.AddrFromSlice(addrs[i])
+		if !ok {
+			continue
+		}
+		r.addresses = append(r.addresses, addr)
+	}
+	return &r
+}
+
+func lookupAddrs(wg *sync.WaitGroup, hostnames <-chan *url.URL, resolvedAddr chan<- *resolvedUrl, cancel <-chan struct{}) {
+	defer wg.Done()
+
+	for {
+		var h *url.URL
+		var ok bool
+
+		/* Quit without possibility of selecting other cases */
+		select {
+		case <-cancel:
+			return
+		default:
+		}
+
+		/* Stop blocking if canceled */
+		select {
+		case h, ok = <-hostnames:
+		case <-cancel:
+			return
+		}
+		if !ok {
+			break
+		}
+
+		select {
+		case resolvedAddr <- lookupAddr(h):
+		case <-cancel:
+			return
+		}
+	}
 }
 
 func scrapConnection(r *roundtrip) *roundtrip {
@@ -237,13 +265,40 @@ func scrapConnections(wg *sync.WaitGroup, pendingScraps <-chan *roundtrip, scrap
 	}
 }
 
+func getNextConnection(pendingConns, activeConns []*connection) *connection {
+	var c *connection
+	keepAliveIdx := indexKeepAliveConnection(activeConns)
+	keepAliveConnection := keepAliveIdx != -1
+	if keepAliveConnection {
+		// Prioritise existing connections to avoid http keep-alive
+		// or NAT mapping expires
+		c = activeConns[keepAliveIdx]
+	} else if len(pendingConns) > 0 {
+		// Create a new connection
+		c = pendingConns[0]
+	}
+	return c
+}
+
+func getNextUrl(pendingResolutions [][]*url.URL) *url.URL {
+	if len(pendingResolutions) == 0 {
+		return nil
+	}
+
+	return pendingResolutions[0][0]
+}
+
 func MeasureMaxConnections(urls []*url.URL) int {
+	lookupAddrRequest := make(chan *url.URL)
+	lookupAddrReply := make(chan *resolvedUrl)
 	scrapRequest := make(chan *roundtrip)
 	scrapedReply := make(chan *roundtrip)
-	stopScraping := make(chan struct{})
+	stopC := make(chan struct{})
+	lookupCounter := sync.WaitGroup{}
 	scapersCounter := sync.WaitGroup{}
 
-	pendingConns := make([]*connection, 0)
+	pendingResolutions := [][]*url.URL{}
+	pendingConns := []*connection{}
 	for i := range urls {
 		c := makeConnection(urls[i])
 		c.id = uint(i)
@@ -253,8 +308,11 @@ func MeasureMaxConnections(urls []*url.URL) int {
 	nScrapers := min(len(urls), 2*runtime.NumCPU())
 	nScrapers = max(nScrapers, int(len(urls)/100))
 	for i := 0; i < nScrapers; i++ {
+		lookupCounter.Add(1)
+		go lookupAddrs(&lookupCounter, lookupAddrRequest, lookupAddrReply, stopC)
+
 		scapersCounter.Add(1)
-		go scrapConnections(&scapersCounter, scrapRequest, scrapedReply, stopScraping)
+		go scrapConnections(&scapersCounter, scrapRequest, scrapedReply, stopC)
 	}
 	maxNScrapers := len(urls)
 
@@ -262,22 +320,17 @@ func MeasureMaxConnections(urls []*url.URL) int {
 	activeConns := make([]*connection, 0)
 	failedConns := make([]*connection, 0)
 	for {
+		var lookupAddrRequestC chan<- *url.URL = nil
 		var scrapRequestC chan<- *roundtrip = nil
 		timedOut := false
 
-		var c *connection
-		keepAliveIdx := indexKeepAliveConnection(activeConns)
-		keepAliveConnection := keepAliveIdx != -1
-		if keepAliveConnection {
-			// Prioritise existing connections to avoid http keep-alive
-			// or NAT mapping expires
-			c = activeConns[keepAliveIdx]
-		} else if len(pendingConns) > 0 {
-			// Create a new connection
-			c = pendingConns[0]
+		hUrl := getNextUrl(pendingResolutions)
+		if hUrl != nil {
+			lookupAddrRequestC = lookupAddrRequest
 		}
 
 		var request *roundtrip = nil
+		c := getNextConnection(pendingConns, activeConns)
 		if c != nil {
 			scrapRequestC = scrapRequest
 			target := c.url
@@ -290,13 +343,33 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		select {
 		case <-time.After(50 * time.Millisecond):
 			timedOut = true
+		case lookupAddrRequestC <- hUrl:
+			// Rotate lookups from reach connection response to avoid spending ages on one
+			// connection whilst others are already getting re-requested
+			if len(pendingResolutions[0]) < 2 {
+				pendingResolutions = pendingResolutions[1:]
+			} else {
+				pendingResolutions = append(pendingResolutions[1:], pendingResolutions[0])
+			}
+		case h, ok := <-lookupAddrReply:
+			if !ok {
+				return -1
+			}
+
+			i := indexConnectionByAddrs(activeConns, h.addresses)
+			if i == -1 {
+				break
+			}
+			c := activeConns[i]
+			h.url.Host = fmt.Sprintf("%v:%v", h.url.Hostname(), c.host.ip.Port())
+			activeConns[i].uncrawledUrls = append(activeConns[i].uncrawledUrls, h.url)
 		case scrapRequestC <- request:
 			if len(pendingConns) > 0 && pendingConns[0] == c {
 				pendingConns = pendingConns[1:]
 			}
 
 			// Track how many of the last 10 scraps were for an existing connection
-			if keepAliveConnection {
+			if len(c.crawledUrls) > 0 {
 				keepAliveRequestsInWindow = min(keepAliveRequestsInWindow+1, 10)
 			} else {
 				keepAliveRequestsInWindow = max(keepAliveRequestsInWindow-1, 0)
@@ -308,49 +381,48 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				return -1
 			}
 
+			if len(reply.scrapedUrls) > 0 {
+				pendingResolutions = append(pendingResolutions, reply.scrapedUrls)
+			}
+
+			var c *connection
 			i := slices.IndexFunc(activeConns, func(c *connection) bool {
 				return reply.connId == c.id
 			})
-			if i == -1 {
-				c := &connection{
+			if i != -1 {
+				c = activeConns[i]
+
+				// Adjust uncrawled and crawled urls
+				j := slices.IndexFunc(c.uncrawledUrls, func(u *url.URL) bool {
+					return *u == *reply.url
+				})
+				if j != -1 {
+					c.uncrawledUrls = slices.Delete(c.uncrawledUrls, j, j+1)
+				}
+
+				if reply.failed {
+					failedConns = append(failedConns, c)
+					activeConns = slices.Delete(activeConns, i, i+1)
+				}
+			} else {
+				c = &connection{
 					id: reply.connId, client: reply.client, url: reply.url,
-					uncrawledUrls: reply.scrapedUrls,
+					uncrawledUrls: []*url.URL{},
 					crawledUrls:   []*url.URL{reply.url},
 					host:          reply.host,
-					lastRequest:   reply.requestTs,
-					lastReply:     reply.replyTs,
 				}
+
 				if reply.failed {
 					failedConns = append(failedConns, c)
 				} else {
 					activeConns = append(activeConns, c)
 				}
-				break
-			}
-			c := activeConns[i]
-			// Adjust uncrawled and crawled urls
-			j := slices.IndexFunc(c.uncrawledUrls, func(u *url.URL) bool {
-				return *u == *reply.url
-			})
-			if j != -1 {
-				c.uncrawledUrls = slices.Delete(c.uncrawledUrls, j, j+1)
-			}
-			// Add any new urls to the connection's uncrawled urls
-			for i := range reply.scrapedUrls {
-				u := reply.scrapedUrls[i]
-				if sliceContainsUrl(c.uncrawledUrls, u) || sliceContainsUrl(c.crawledUrls, u) {
-					continue
-				}
-				c.uncrawledUrls = append(c.uncrawledUrls, u)
-			}
-			if !sliceContainsUrl(c.crawledUrls, reply.url) {
-				c.crawledUrls = append(c.crawledUrls, reply.url)
 			}
 			c.lastRequest = reply.requestTs
 			c.lastReply = reply.replyTs
-			if reply.failed {
-				failedConns = append(failedConns, activeConns[i])
-				activeConns = slices.Delete(activeConns, i, i+1)
+
+			if !sliceContainsUrl(c.crawledUrls, reply.url) {
+				c.crawledUrls = append(c.crawledUrls, reply.url)
 			}
 		}
 
@@ -364,16 +436,19 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			nNewScrapers := min((keepAliveRequestsInWindow-1)*nScrapers, maxNScrapers-nScrapers)
 			for s := 0; s < nNewScrapers; s++ {
 				scapersCounter.Add(1)
-				go scrapConnections(&scapersCounter, scrapRequest, scrapedReply, stopScraping)
+				go scrapConnections(&scapersCounter, scrapRequest, scrapedReply, stopC)
 
 			}
 			nScrapers += nNewScrapers
 		}
 	}
 
-	close(stopScraping)
+	close(stopC)
+	close(lookupAddrRequest)
 	close(scrapRequest)
+	lookupCounter.Wait()
 	scapersCounter.Wait()
+	close(lookupAddrReply)
 	close(scrapedReply)
 	return len(activeConns)
 }
