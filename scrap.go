@@ -1,3 +1,4 @@
+// Functions related to scraping urls from HTTP pages.
 package main
 
 import (
