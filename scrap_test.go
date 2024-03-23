@@ -85,10 +85,11 @@ func TestScrap(t *testing.T) {
 			}
 
 			links := Scrap(u, openFile(t, tc.inHtml))
-
+			slinks := urlsToStrings(links)
+			sort.Strings(slinks)
 			sort.Strings(tc.outUrls)
-			if !reflect.DeepEqual(tc.outUrls, urlsToStrings(links)) {
-				t.Error("Failed to parse urls out of html: ", tc.outUrls, " != ", links)
+			if !reflect.DeepEqual(tc.outUrls, slinks) {
+				t.Error("Failed to parse urls out of html: ", tc.outUrls, " != ", slinks)
 			}
 		})
 	}
