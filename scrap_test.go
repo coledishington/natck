@@ -74,6 +74,21 @@ func TestScrap(t *testing.T) {
 				"http://localhost:8081/hibiscuscoast.html",
 			},
 		},
+		"Relative hrefs with base": {
+			inHtml: "testdata/relative_hrefs_with_base.html",
+			outUrls: []string{
+				"http://island.nz/auckland.html",
+				"http://island.nz/christchurch.html",
+				"http://island.nz/wellington.html",
+				"http://island.nz/hamilton.html",
+				"http://island.nz/tauranga.html",
+				"http://island.nz/lowerhutt.html",
+				"http://island.nz/dunedin.html",
+				"http://island.nz/palmerstonnorth.html",
+				"http://island.nz/napier.html",
+				"http://island.nz/hibiscuscoast.html",
+			},
+		},
 	}
 
 	host := "http://localhost:8081/"

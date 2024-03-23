@@ -12,6 +12,16 @@ func urlCmp(u1, u2 *url.URL) bool {
 	return u1.Host == u2.Host && u1.Path == u2.Path
 }
 
+func findNodeAtomInNode(n *html.Node, tag atom.Atom) *html.Node {
+	iter := n.FirstChild
+	for ; iter != nil; iter = iter.NextSibling {
+		if iter.DataAtom == tag {
+			break
+		}
+	}
+	return iter
+}
+
 func findAllAtomTagInNode(n *html.Node, tag atom.Atom) []*html.Node {
 	matches := []*html.Node{}
 	stack := []*html.Node{}
@@ -19,7 +29,8 @@ func findAllAtomTagInNode(n *html.Node, tag atom.Atom) []*html.Node {
 		if iter.DataAtom == tag {
 			matches = append(matches, iter)
 		}
-		for child := iter.FirstChild; child != nil; child = child.NextSibling {
+		// Retain the ordering of the original document
+		for child := iter.LastChild; child != nil; child = child.PrevSibling {
 			stack = append(stack, child)
 		}
 		if len(stack) == 0 {
@@ -49,6 +60,20 @@ func findHref(n *html.Node) (*url.URL, error) {
 	return url.Parse(href.Val)
 }
 
+func findBaseHrefInNode(n *html.Node) (*url.URL, error) {
+	head := findNodeAtomInNode(n, atom.Head)
+	if head == nil {
+		return nil, nil
+	}
+
+	base := findNodeAtomInNode(head, atom.Base)
+	if base == nil {
+		return nil, nil
+	}
+
+	return findHref(base)
+}
+
 func Scrap(host *url.URL, body io.Reader) []*url.URL {
 	urls := []*url.URL{}
 	doc, err := html.Parse(body)
@@ -56,12 +81,26 @@ func Scrap(host *url.URL, body io.Reader) []*url.URL {
 		return urls
 	}
 
+	root := findNodeAtomInNode(doc, atom.Html)
+	if root == nil {
+		return urls
+	}
+
+	baseHref, err := findBaseHrefInNode(root)
+	if err != nil {
+		return urls
+	}
+
 	// Parse gettable urls
-	links := findAllAtomTagInNode(doc, atom.A)
+	links := findAllAtomTagInNode(root, atom.A)
 	for _, n := range links {
 		u, err := findHref(n)
 		if u == nil || err != nil {
 			continue
+		}
+
+		if !u.IsAbs() && baseHref != nil {
+			u = baseHref.JoinPath(u.String())
 		}
 
 		nUrl := u
