@@ -8,7 +8,6 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
-	"sync"
 	"time"
 )
 
@@ -93,36 +92,4 @@ func scrapConnection(r *roundtrip) *roundtrip {
 	r.failed = err != nil
 	r.scrapedUrls = sUrls
 	return r
-}
-
-func scrapConnections(wg *sync.WaitGroup, pendingScraps <-chan *roundtrip, scraped chan<- *roundtrip, cancel <-chan struct{}) {
-	defer wg.Done()
-
-	for {
-		var r *roundtrip
-		var ok bool
-
-		// Quit without possibility of selecting other cases */
-		select {
-		case <-cancel:
-			return
-		default:
-		}
-
-		// Stop blocking if canceled */
-		select {
-		case r, ok = <-pendingScraps:
-		case <-cancel:
-			return
-		}
-		if !ok {
-			break
-		}
-
-		select {
-		case scraped <- scrapConnection(r):
-		case <-cancel:
-			return
-		}
-	}
 }
