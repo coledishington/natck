@@ -9,13 +9,9 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"runtime"
 	"slices"
-	"sync"
 	"time"
 )
-
-type workRequest func(cancel <-chan struct{}) bool
 
 type ctxAddrKey struct{}
 
@@ -157,66 +153,28 @@ func getNextConnection(pendingConns, activeConns []*connection) *connection {
 	return nil
 }
 
-func worker(wg *sync.WaitGroup, requests <-chan workRequest, cancel <-chan struct{}) {
-	defer wg.Done()
-
-	for {
-		var w workRequest
-		var ok bool
-
-		// Quit without possibility of selecting other cases
-		select {
-		case <-cancel:
-			return
-		default:
-		}
-
-		// Stop blocking if canceled
-		select {
-		case w, ok = <-requests:
-		case <-cancel:
-			return
-		}
-		if !ok {
-			break
-		}
-
-		canceled := w(cancel)
-		if canceled {
-			return
-		}
+func lookupAddrRequest(h *url.URL, resolvedAddr chan<- *resolvedUrl, cancel <-chan struct{}) {
+	select {
+	case resolvedAddr <- lookupAddr(h):
+	case <-cancel:
 	}
 }
 
-func makeLookupAddrWorkRequest(h *url.URL, resolvedAddr chan<- *resolvedUrl) workRequest {
-	return func(cancel <-chan struct{}) bool {
-		select {
-		case resolvedAddr <- lookupAddr(h):
-		case <-cancel:
-			return true
-		}
-		return false
-	}
-}
-
-func makeScrapConnectionWorkRequest(r *roundtrip, scraped chan<- *roundtrip) workRequest {
+func scrapConnectionRequest(r *roundtrip, scraped chan<- *roundtrip, cancel <-chan struct{}) {
 	ctx := context.WithValue(context.Background(), ctxAddrKey{}, r.host.ip)
-	return func(cancel <-chan struct{}) bool {
-		select {
-		case scraped <- scrapConnection(ctx, r):
-		case <-cancel:
-			return true
-		}
-		return false
+	select {
+	case scraped <- scrapConnection(ctx, r):
+	case <-cancel:
 	}
 }
 
 func MeasureMaxConnections(urls []*url.URL) int {
-	workRequests := make(chan workRequest)
 	lookupAddrReply := make(chan *resolvedUrl)
 	scrapedReply := make(chan *roundtrip)
 	stopC := make(chan struct{})
-	workerCounter := sync.WaitGroup{}
+
+	workerLimit := len(urls)
+	semC := make(chan struct{}, workerLimit)
 
 	connectionIdCtr := uint(0)
 	pendingConns := []*connection{}
@@ -225,28 +183,15 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		pendingResolutions.put(u)
 	}
 
-	nWorkers := min(len(urls), 2*runtime.NumCPU())
-	nWorkers = max(nWorkers, int(len(urls)/100))
-	for i := 0; i < 2*nWorkers; i++ {
-		workerCounter.Add(1)
-		go worker(&workerCounter, workRequests, stopC)
-	}
-	maxNWorkers := len(urls)
-
 	keepAliveRequestsInWindow := 0
 	activeConns := make([]*connection, 0)
 	failedConns := make([]*connection, 0)
 	for {
-		emptyWorkRequest := func(cancel <-chan struct{}) bool { return false }
-		var lookupAddrRequestC chan<- workRequest = nil
-		var scrapRequestC chan<- workRequest = nil
-		lookupRequest := emptyWorkRequest
-		scrapRequest := emptyWorkRequest
-		timedOut := false
+		var lookupAddrSemC chan<- struct{} = nil
+		var scrapRequestSemC chan<- struct{} = nil
 
-		if hUrl := pendingResolutions.peek(); hUrl != nil {
-			lookupAddrRequestC = workRequests
-			lookupRequest = makeLookupAddrWorkRequest(hUrl, lookupAddrReply)
+		if pendingResolutions.peek() != nil {
+			lookupAddrSemC = semC
 		}
 
 		var request *roundtrip = nil
@@ -257,15 +202,17 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				target = c.uncrawledUrls[0]
 			}
 			request = &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}
-			scrapRequestC = workRequests
-			scrapRequest = makeScrapConnectionWorkRequest(request, scrapedReply)
+			scrapRequestSemC = semC
 		}
 
 		select {
 		case <-time.After(50 * time.Millisecond):
-			timedOut = true
-		case lookupAddrRequestC <- lookupRequest:
-			pendingResolutions.pop()
+		case lookupAddrSemC <- struct{}{}:
+			hUrl := pendingResolutions.pop()
+			go func() {
+				lookupAddrRequest(hUrl, lookupAddrReply, stopC)
+				<-semC
+			}()
 		case h, ok := <-lookupAddrReply:
 			if !ok {
 				return -1
@@ -287,7 +234,12 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			c.id = connectionIdCtr
 			pendingConns = append(pendingConns, c)
 			connectionIdCtr++
-		case scrapRequestC <- scrapRequest:
+		case scrapRequestSemC <- struct{}{}:
+			go func() {
+				scrapConnectionRequest(request, scrapedReply, stopC)
+				<-semC
+			}()
+
 			if len(pendingConns) > 0 && pendingConns[0] == c {
 				pendingConns = pendingConns[1:]
 			}
@@ -367,23 +319,13 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		if (len(activeConns) + len(failedConns)) == len(urls) {
 			break
 		}
-
-		// Grow number of workers based on demand, connection upkeep should
-		// account a maximum of 10% of the requests.
-		if !timedOut && keepAliveRequestsInWindow > 1 && nWorkers < maxNWorkers {
-			nNewWorkers := min((keepAliveRequestsInWindow-1)*nWorkers, maxNWorkers-nWorkers)
-			for s := 0; s < nNewWorkers; s++ {
-				workerCounter.Add(1)
-				go worker(&workerCounter, workRequests, stopC)
-
-			}
-			nWorkers += nNewWorkers
-		}
 	}
 
 	close(stopC)
-	close(workRequests)
-	workerCounter.Wait()
+	for i := workerLimit; i > 0; i-- {
+		semC <- struct{}{}
+	}
+	close(semC)
 	close(lookupAddrReply)
 	close(scrapedReply)
 	return len(activeConns)
