@@ -3,7 +3,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -14,6 +16,8 @@ import (
 )
 
 type workRequest func(cancel <-chan struct{}) bool
+
+type ctxAddrKey struct{}
 
 type connection struct {
 	id            uint
@@ -26,17 +30,38 @@ type connection struct {
 	lastReply     time.Time
 }
 
+func urlPort(u *url.URL) string {
+	schemeToPort := map[string]string{
+		"http":  "80",
+		"https": "443",
+	}
+	port := u.Port()
+	if port != "" {
+		return port
+	}
+	return schemeToPort[u.Scheme]
+}
+
+func canonicalHost(url *url.URL) string {
+	return net.JoinHostPort(url.Hostname(), urlPort(url))
+}
+
 func indexKeepAliveConnection(conns []*connection) int {
 	return slices.IndexFunc(conns, func(c *connection) bool {
 		return time.Since(c.lastReply) > 3500*time.Millisecond && time.Since(c.lastRequest) > 1000*time.Millisecond
 	})
 }
 
-func indexConnectionByAddrs(conns []*connection, addrs []netip.Addr) int {
+func indexConnectionByAddr(conns []*connection, addr netip.AddrPort) int {
 	return slices.IndexFunc(conns, func(c *connection) bool {
-		return slices.ContainsFunc(addrs, func(addr netip.Addr) bool {
-			return c.host.ip.Addr() == addr
-		})
+		return c.host.ip == addr
+	})
+}
+
+func indexConnectionByHostPort(conns []*connection, u *url.URL) int {
+	hostPort := canonicalHost(u)
+	return slices.IndexFunc(conns, func(c *connection) bool {
+		return c.host.hostPort == hostPort
 	})
 }
 
@@ -48,6 +73,13 @@ func makeClient() *http.Client {
 	transport.IdleConnTimeout = 0
 	transport.MaxIdleConns = 1
 	transport.MaxConnsPerHost = 1
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// Http clients should not resolve the address. Overriding the dial avoids having to
+		// override URL and TLS ServerName.
+		addrShouldUse := ctx.Value(ctxAddrKey{}).(netip.AddrPort)
+		return http.DefaultTransport.(*http.Transport).DialContext(ctx, network, addrShouldUse.String())
+	}
+
 	client := http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// Do not follow re-directs
@@ -58,12 +90,15 @@ func makeClient() *http.Client {
 	return &client
 }
 
-func makeConnection(h *url.URL) *connection {
+func makeConnection(addr netip.AddrPort, h *url.URL) *connection {
 	c := &connection{
 		client:        makeClient(),
 		url:           h,
 		uncrawledUrls: []*url.URL{h},
-		host:          &host{hostnames: []string{h.Hostname()}},
+		host: &host{
+			hostPort: canonicalHost(h),
+			ip:       addr,
+		},
 	}
 	return c
 }
@@ -134,9 +169,10 @@ func makeLookupAddrWorkRequest(h *url.URL, resolvedAddr chan<- *resolvedUrl) wor
 }
 
 func makeScrapConnectionWorkRequest(r *roundtrip, scraped chan<- *roundtrip) workRequest {
+	ctx := context.WithValue(context.Background(), ctxAddrKey{}, r.host.ip)
 	return func(cancel <-chan struct{}) bool {
 		select {
-		case scraped <- scrapConnection(r):
+		case scraped <- scrapConnection(ctx, r):
 		case <-cancel:
 			return true
 		}
@@ -151,12 +187,11 @@ func MeasureMaxConnections(urls []*url.URL) int {
 	stopC := make(chan struct{})
 	workerCounter := sync.WaitGroup{}
 
-	pendingResolutions := [][]*url.URL{}
+	connectionIdCtr := uint(0)
 	pendingConns := []*connection{}
-	for i := range urls {
-		c := makeConnection(urls[i])
-		c.id = uint(i)
-		pendingConns = append(pendingConns, c)
+	pendingResolutions := [][]*url.URL{}
+	for _, u := range urls {
+		pendingResolutions = append(pendingResolutions, []*url.URL{u})
 	}
 
 	nWorkers := min(len(urls), 2*runtime.NumCPU())
@@ -212,13 +247,22 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				return -1
 			}
 
-			i := indexConnectionByAddrs(activeConns, h.addresses)
-			if i == -1 {
+			unusedAddresses := []netip.AddrPort{}
+			for _, address := range h.addresses {
+				k := indexConnectionByAddr(activeConns, address)
+				if k != -1 {
+					break
+				}
+				unusedAddresses = append(unusedAddresses, address)
+			}
+			if len(unusedAddresses) == 0 {
 				break
 			}
-			c := activeConns[i]
-			h.url.Host = fmt.Sprintf("%v:%v", h.url.Hostname(), c.host.ip.Port())
-			activeConns[i].uncrawledUrls = append(activeConns[i].uncrawledUrls, h.url)
+
+			c := makeConnection(unusedAddresses[0], h.url)
+			c.id = connectionIdCtr
+			pendingConns = append(pendingConns, c)
+			connectionIdCtr++
 		case scrapRequestC <- scrapRequest:
 			if len(pendingConns) > 0 && pendingConns[0] == c {
 				pendingConns = pendingConns[1:]
@@ -237,8 +281,30 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				return -1
 			}
 
-			if len(reply.scrapedUrls) > 0 {
-				pendingResolutions = append(pendingResolutions, reply.scrapedUrls)
+			newUrls := []*url.URL{}
+			for i := range reply.scrapedUrls {
+				u := reply.scrapedUrls[i]
+				j := indexConnectionByHostPort(activeConns, u)
+				if j == -1 {
+					newUrls = append(newUrls, u)
+					continue
+				}
+
+				c := activeConns[j]
+				u.Host = fmt.Sprintf("%v:%v", u.Hostname(), c.host.ip.Port())
+				c.uncrawledUrls = append(c.uncrawledUrls, u)
+			}
+			urlsToResolve := []*url.URL{}
+			for i := range newUrls {
+				u := newUrls[i]
+				j := indexConnectionByHostPort(pendingConns, u)
+				if j != -1 {
+					continue
+				}
+				urlsToResolve = append(urlsToResolve, u)
+			}
+			if len(urlsToResolve) > 0 {
+				pendingResolutions = append(pendingResolutions, urlsToResolve)
 			}
 
 			var c *connection

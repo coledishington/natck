@@ -2,9 +2,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net/http"
-	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -12,8 +12,8 @@ import (
 )
 
 type host struct {
-	ip        netip.AddrPort
-	hostnames []string
+	ip       netip.AddrPort
+	hostPort string
 }
 
 type roundtrip struct {
@@ -33,32 +33,24 @@ func sliceContainsUrl(urls []*url.URL, needle *url.URL) bool {
 	})
 }
 
-func getUrl(client *http.Client, target *url.URL) (netip.AddrPort, *http.Response, error) {
-	remoteAddr := netip.AddrPortFrom(netip.IPv4Unspecified(), 0)
+func getUrl(ctx context.Context, client *http.Client, target *url.URL) (*http.Response, error) {
 	targetUrl := target.String()
-	req, err := http.NewRequest(http.MethodGet, targetUrl, nil)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetUrl, nil)
 	if err != nil {
 		err = fmt.Errorf("failed to make request: %w", err)
-		return remoteAddr, nil, err
+		return nil, err
 	}
-	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
-		ConnectDone: func(network, addr string, _ error) {
-			rAddr, err := netip.ParseAddrPort(addr)
-			if err != nil {
-				return
-			}
-			remoteAddr = rAddr
-		},
-	}))
+
 	resp, err := client.Do(req)
 	if err != nil {
 		err = fmt.Errorf("failed get uri %v: %w", targetUrl, err)
-		return remoteAddr, nil, err
+		return nil, err
 	}
-	return remoteAddr, resp, err
+	return resp, err
 }
 
-func scrapResponse(target *url.URL, resp *http.Response) []*url.URL {
+func scrapResponse(ctx context.Context, target *url.URL, resp *http.Response) []*url.URL {
 	// Parse urls from content
 	urls := Scrap(target, resp.Body)
 
@@ -70,24 +62,19 @@ func scrapResponse(target *url.URL, resp *http.Response) []*url.URL {
 	return urls
 }
 
-func scrapHostUrl(client *http.Client, host *host, target *url.URL) ([]*url.URL, error) {
-	remoteIP, resp, err := getUrl(client, target)
+func scrapHostUrl(ctx context.Context, client *http.Client, target *url.URL) ([]*url.URL, error) {
+	resp, err := getUrl(ctx, client, target)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// Use the new IP if a new connection was made
-	if !remoteIP.Addr().IsUnspecified() {
-		host.ip = remoteIP
-	}
-
-	return scrapResponse(target, resp), nil
+	return scrapResponse(ctx, target, resp), nil
 }
 
-func scrapConnection(r *roundtrip) *roundtrip {
+func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
 	r.requestTs = time.Now()
-	sUrls, err := scrapHostUrl(r.client, r.host, r.url)
+	sUrls, err := scrapHostUrl(ctx, r.client, r.url)
 	r.replyTs = time.Now()
 	r.failed = err != nil
 	r.scrapedUrls = sUrls

@@ -5,15 +5,24 @@ import (
 	"net"
 	"net/netip"
 	"net/url"
+	"strconv"
 )
 
 type resolvedUrl struct {
 	url       *url.URL
-	addresses []netip.Addr
+	addresses []netip.AddrPort
 }
 
 func lookupAddr(h *url.URL) *resolvedUrl {
 	r := resolvedUrl{url: h}
+
+	portString := urlPort(h)
+	p64, err := strconv.ParseUint(portString, 10, 16)
+	if err != nil {
+		return &r
+	}
+	p := uint16(p64)
+
 	addrs, err := net.LookupIP(r.url.Hostname())
 	if err != nil {
 		return &r
@@ -24,7 +33,8 @@ func lookupAddr(h *url.URL) *resolvedUrl {
 		if !ok {
 			continue
 		}
-		r.addresses = append(r.addresses, addr)
+		addrport := netip.AddrPortFrom(addr, p)
+		r.addresses = append(r.addresses, addrport)
 	}
 	return &r
 }

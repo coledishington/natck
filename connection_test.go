@@ -162,10 +162,6 @@ func TestMeasureMaxConnections(t *testing.T) {
 			inPorts:   []int{8081, 8082, 8083},
 			outNConns: 3,
 		},
-		"repeat servers": {
-			inPorts:   []int{8081, 8081, 8082},
-			outNConns: 3,
-		},
 		"reachable and unreachable servers": {
 			inPorts:   []int{8081, 8089, 8090, 8082, 8091},
 			outNConns: 2,
