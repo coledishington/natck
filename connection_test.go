@@ -210,8 +210,8 @@ func TestMeasureMaxConnections(t *testing.T) {
 				})
 			}
 
-			for i := range httpServers {
-				startHttpServer(t, httpServers[i])
+			for _, srv := range httpServers {
+				startHttpServer(t, srv)
 			}
 
 			nConns := MeasureMaxConnections(urls)
@@ -219,18 +219,17 @@ func TestMeasureMaxConnections(t *testing.T) {
 				t.Errorf("expected to measure %d client connections, got %d", tc.outNConns, nConns)
 			}
 
-			for i := range httpServers {
-				s := httpServers[i]
-				s.stats.m.Lock()
-				if s.stats.connections != portToNConns[s.port] {
-					t.Errorf("expected server on port %d to get %d connections, got %d", s.port, portToNConns[s.port], s.stats.connections)
+			for _, srv := range httpServers {
+				srv.stats.m.Lock()
+				if srv.stats.connections != portToNConns[srv.port] {
+					t.Errorf("expected server on port %d to get %d connections, got %d", srv.port, portToNConns[srv.port], srv.stats.connections)
 				}
-				s.stats.m.Unlock()
+				srv.stats.m.Unlock()
 			}
 
 			totalConnections := 0
-			for i := range httpServers {
-				s := &httpServers[i].stats
+			for _, srv := range httpServers {
+				s := &srv.stats
 				s.m.Lock()
 				totalConnections += s.connections
 				s.m.Unlock()
@@ -269,8 +268,8 @@ func TestMeasureMaxConnectionsBig(t *testing.T) {
 	if nConns != nConnections {
 		t.Error("expected (nConns=", 10, "), got (nConns=", nConns, ")")
 	}
-	for i := range httpSrvs {
-		s := &httpSrvs[i].stats
+	for _, srv := range httpSrvs {
+		s := &srv.stats
 		s.m.Lock()
 		if s.connections != 1 {
 			t.Fatal("expected no more than one connection per http server, got", s.connections)

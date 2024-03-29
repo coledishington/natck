@@ -90,39 +90,35 @@ func makeClient() *http.Client {
 	return &client
 }
 
-func makeConnection(addr netip.AddrPort, h *url.URL) *connection {
+func makeConnection(addr netip.AddrPort, target *url.URL) *connection {
 	c := &connection{
 		client:        makeClient(),
-		url:           h,
-		uncrawledUrls: []*url.URL{h},
+		url:           target,
+		uncrawledUrls: []*url.URL{target},
 		host: &host{
-			hostPort: canonicalHost(h),
 			ip:       addr,
+			hostPort: canonicalHost(target),
 		},
 	}
 	return c
 }
 
 func getNextConnection(pendingConns, activeConns []*connection) *connection {
-	var c *connection
-	keepAliveIdx := indexKeepAliveConnection(activeConns)
-	keepAliveConnection := keepAliveIdx != -1
-	if keepAliveConnection {
+	if i := indexKeepAliveConnection(activeConns); i != -1 {
 		// Prioritise existing connections to avoid http keep-alive
 		// or NAT mapping expires
-		c = activeConns[keepAliveIdx]
-	} else if len(pendingConns) > 0 {
-		// Create a new connection
-		c = pendingConns[0]
+		return activeConns[i]
 	}
-	return c
+	if len(pendingConns) > 0 {
+		return pendingConns[0]
+	}
+	return nil
 }
 
 func getNextUrl(pendingResolutions [][]*url.URL) *url.URL {
 	if len(pendingResolutions) == 0 {
 		return nil
 	}
-
 	return pendingResolutions[0][0]
 }
 
@@ -213,8 +209,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		scrapRequest := emptyWorkRequest
 		timedOut := false
 
-		hUrl := getNextUrl(pendingResolutions)
-		if hUrl != nil {
+		if hUrl := getNextUrl(pendingResolutions); hUrl != nil {
 			lookupAddrRequestC = workRequests
 			lookupRequest = makeLookupAddrWorkRequest(hUrl, lookupAddrReply)
 		}
@@ -282,23 +277,21 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 
 			newUrls := []*url.URL{}
-			for i := range reply.scrapedUrls {
-				u := reply.scrapedUrls[i]
-				j := indexConnectionByHostPort(activeConns, u)
-				if j == -1 {
+			for _, u := range reply.scrapedUrls {
+				i := indexConnectionByHostPort(activeConns, u)
+				if i == -1 {
 					newUrls = append(newUrls, u)
 					continue
 				}
 
-				c := activeConns[j]
+				c := activeConns[i]
 				u.Host = fmt.Sprintf("%v:%v", u.Hostname(), c.host.ip.Port())
 				c.uncrawledUrls = append(c.uncrawledUrls, u)
 			}
 			urlsToResolve := []*url.URL{}
-			for i := range newUrls {
-				u := newUrls[i]
-				j := indexConnectionByHostPort(pendingConns, u)
-				if j != -1 {
+			for _, u := range newUrls {
+				i := indexConnectionByHostPort(pendingConns, u)
+				if i != -1 {
 					continue
 				}
 				urlsToResolve = append(urlsToResolve, u)

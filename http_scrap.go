@@ -50,7 +50,7 @@ func getUrl(ctx context.Context, client *http.Client, target *url.URL) (*http.Re
 	return resp, err
 }
 
-func scrapResponse(ctx context.Context, target *url.URL, resp *http.Response) []*url.URL {
+func scrapResponse(target *url.URL, resp *http.Response) []*url.URL {
 	// Parse urls from content
 	urls := Scrap(target, resp.Body)
 
@@ -69,7 +69,7 @@ func scrapHostUrl(ctx context.Context, client *http.Client, target *url.URL) ([]
 	}
 	defer resp.Body.Close()
 
-	return scrapResponse(ctx, target, resp), nil
+	return scrapResponse(target, resp), nil
 }
 
 func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
