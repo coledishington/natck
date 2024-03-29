@@ -30,6 +30,36 @@ type connection struct {
 	lastReply     time.Time
 }
 
+// Rotates lookups from each connection response to avoid
+// spending ages resolving one connection whilst others
+// are already.
+type lookupQueue struct {
+	urls [][]*url.URL
+}
+
+func (q lookupQueue) peek() *url.URL {
+	if len(q.urls) == 0 {
+		return nil
+	}
+	return q.urls[0][0]
+}
+
+func (q *lookupQueue) put(u ...*url.URL) {
+	q.urls = append(q.urls, u)
+}
+
+func (q *lookupQueue) pop() *url.URL {
+	u := q.urls[0][0]
+
+	if len(q.urls[0]) == 1 {
+		q.urls = q.urls[1:]
+		return u
+	}
+
+	q.urls = append(q.urls[1:], q.urls[0])
+	return u
+}
+
 func urlPort(u *url.URL) string {
 	schemeToPort := map[string]string{
 		"http":  "80",
@@ -115,13 +145,6 @@ func getNextConnection(pendingConns, activeConns []*connection) *connection {
 	return nil
 }
 
-func getNextUrl(pendingResolutions [][]*url.URL) *url.URL {
-	if len(pendingResolutions) == 0 {
-		return nil
-	}
-	return pendingResolutions[0][0]
-}
-
 func worker(wg *sync.WaitGroup, requests <-chan workRequest, cancel <-chan struct{}) {
 	defer wg.Done()
 
@@ -185,9 +208,9 @@ func MeasureMaxConnections(urls []*url.URL) int {
 
 	connectionIdCtr := uint(0)
 	pendingConns := []*connection{}
-	pendingResolutions := [][]*url.URL{}
+	pendingResolutions := lookupQueue{}
 	for _, u := range urls {
-		pendingResolutions = append(pendingResolutions, []*url.URL{u})
+		pendingResolutions.put(u)
 	}
 
 	nWorkers := min(len(urls), 2*runtime.NumCPU())
@@ -209,7 +232,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		scrapRequest := emptyWorkRequest
 		timedOut := false
 
-		if hUrl := getNextUrl(pendingResolutions); hUrl != nil {
+		if hUrl := pendingResolutions.peek(); hUrl != nil {
 			lookupAddrRequestC = workRequests
 			lookupRequest = makeLookupAddrWorkRequest(hUrl, lookupAddrReply)
 		}
@@ -230,13 +253,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		case <-time.After(50 * time.Millisecond):
 			timedOut = true
 		case lookupAddrRequestC <- lookupRequest:
-			// Rotate lookups from reach connection response to avoid spending ages on one
-			// connection whilst others are already getting re-requested
-			if len(pendingResolutions[0]) < 2 {
-				pendingResolutions = pendingResolutions[1:]
-			} else {
-				pendingResolutions = append(pendingResolutions[1:], pendingResolutions[0])
-			}
+			pendingResolutions.pop()
 		case h, ok := <-lookupAddrReply:
 			if !ok {
 				return -1
@@ -297,7 +314,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				urlsToResolve = append(urlsToResolve, u)
 			}
 			if len(urlsToResolve) > 0 {
-				pendingResolutions = append(pendingResolutions, urlsToResolve)
+				pendingResolutions.put(urlsToResolve...)
 			}
 
 			var c *connection
