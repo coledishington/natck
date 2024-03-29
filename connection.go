@@ -76,9 +76,21 @@ func canonicalHost(url *url.URL) string {
 	return net.JoinHostPort(url.Hostname(), urlPort(url))
 }
 
+func indexUrls(urls []*url.URL, needle *url.URL) int {
+	return slices.IndexFunc(urls, func(u *url.URL) bool {
+		return *u == *needle
+	})
+}
+
 func indexKeepAliveConnection(conns []*connection) int {
 	return slices.IndexFunc(conns, func(c *connection) bool {
 		return time.Since(c.lastReply) > 3500*time.Millisecond && time.Since(c.lastRequest) > 1000*time.Millisecond
+	})
+}
+
+func indexConnectionById(conns []*connection, needle uint) int {
+	return slices.IndexFunc(conns, func(c *connection) bool {
+		return c.id == needle
 	})
 }
 
@@ -318,17 +330,11 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 
 			var c *connection
-			i := slices.IndexFunc(activeConns, func(c *connection) bool {
-				return reply.connId == c.id
-			})
-			if i != -1 {
+			if i := indexConnectionById(activeConns, reply.connId); i != -1 {
 				c = activeConns[i]
 
-				// Adjust uncrawled and crawled urls
-				j := slices.IndexFunc(c.uncrawledUrls, func(u *url.URL) bool {
-					return *u == *reply.url
-				})
-				if j != -1 {
+				// Adjust uncrawled urls
+				if j := indexUrls(c.uncrawledUrls, reply.url); j != -1 {
 					c.uncrawledUrls = slices.Delete(c.uncrawledUrls, j, j+1)
 				}
 
