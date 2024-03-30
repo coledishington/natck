@@ -178,13 +178,20 @@ func MeasureMaxConnections(urls []*url.URL) int {
 	connectionIdCtr := uint(0)
 	pendingConns := []*connection{}
 	pendingResolutions := lookupQueue{}
+
+	uniqueUrls := []*url.URL{}
 	for _, u := range urls {
+		if sliceContainsUrl(uniqueUrls, u) {
+			continue
+		}
+		uniqueUrls = append(uniqueUrls, u)
+	}
+	for _, u := range uniqueUrls {
 		pendingResolutions.put(u)
 	}
 
 	keepAliveRequestsInWindow := 0
 	activeConns := make([]*connection, 0)
-	failedConns := make([]*connection, 0)
 	for {
 		var lookupAddrSemC chan<- struct{} = nil
 		var scrapRequestSemC chan<- struct{} = nil
@@ -289,7 +296,6 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				}
 
 				if reply.failed {
-					failedConns = append(failedConns, c)
 					activeConns = slices.Delete(activeConns, i, i+1)
 				}
 			} else {
@@ -300,9 +306,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 					host:          reply.host,
 				}
 
-				if reply.failed {
-					failedConns = append(failedConns, c)
-				} else {
+				if !reply.failed {
 					activeConns = append(activeConns, c)
 				}
 			}
@@ -314,8 +318,17 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 		}
 
-		if (len(activeConns) + len(failedConns)) == len(urls) {
-			break
+		if len(pendingConns) == 0 && len(pendingResolutions.urls) == 0 && len(semC) == 0 {
+			haveUncrawledUrls := false
+			for _, c := range activeConns {
+				haveUncrawledUrls = len(c.uncrawledUrls) > 0
+				if haveUncrawledUrls {
+					break
+				}
+			}
+			if !haveUncrawledUrls {
+				break
+			}
 		}
 	}
 

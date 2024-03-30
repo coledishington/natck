@@ -162,6 +162,10 @@ func TestMeasureMaxConnections(t *testing.T) {
 			inPorts:   []int{8081, 8082, 8083},
 			outNConns: 3,
 		},
+		"repeat servers": {
+			inPorts:   []int{8081, 8081, 8082},
+			outNConns: 2,
+		},
 		"reachable and unreachable servers": {
 			inPorts:   []int{8081, 8089, 8090, 8082, 8091},
 			outNConns: 2,
@@ -174,7 +178,7 @@ func TestMeasureMaxConnections(t *testing.T) {
 		"server redirect": {
 			inPorts:        []int{8081, 8082},
 			inPortRedirect: map[int]int{8082: 8083},
-			outNConns:      2,
+			outNConns:      3,
 		},
 	}
 
@@ -190,8 +194,13 @@ func TestMeasureMaxConnections(t *testing.T) {
 			}
 
 			portToNConns := make(map[int]int, 0)
+			// Servers should not repeat connections
 			for _, port := range tc.inPorts {
-				portToNConns[port]++
+				portToNConns[port] = 1
+			}
+			// http client should discover clients via redirect
+			for _, port := range tc.inPortRedirect {
+				portToNConns[port] = 1
 			}
 
 			httpServers := []*httpTestServer{}
