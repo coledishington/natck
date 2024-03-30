@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -68,8 +67,8 @@ func urlPort(u *url.URL) string {
 	return schemeToPort[u.Scheme]
 }
 
-func canonicalHost(url *url.URL) string {
-	return net.JoinHostPort(url.Hostname(), urlPort(url))
+func canonicalHost(u *url.URL) string {
+	return net.JoinHostPort(u.Hostname(), urlPort(u))
 }
 
 func indexUrls(urls []*url.URL, needle *url.URL) int {
@@ -220,8 +219,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 
 			unusedAddresses := []netip.AddrPort{}
 			for _, address := range h.addresses {
-				k := indexConnectionByAddr(activeConns, address)
-				if k != -1 {
+				if indexConnectionByAddr(activeConns, address) != -1 {
 					break
 				}
 				unusedAddresses = append(unusedAddresses, address)
@@ -259,15 +257,15 @@ func MeasureMaxConnections(urls []*url.URL) int {
 
 			newUrls := []*url.URL{}
 			for _, u := range reply.scrapedUrls {
-				i := indexConnectionByHostPort(activeConns, u)
-				if i == -1 {
-					newUrls = append(newUrls, u)
+				if i := indexConnectionByHostPort(activeConns, u); i != -1 {
+					c := activeConns[i]
+					if !sliceContainsUrl(c.uncrawledUrls, u) || !sliceContainsUrl(c.crawledUrls, u) {
+						c.uncrawledUrls = append(c.uncrawledUrls, u)
+					}
 					continue
 				}
 
-				c := activeConns[i]
-				u.Host = fmt.Sprintf("%v:%v", u.Hostname(), c.host.ip.Port())
-				c.uncrawledUrls = append(c.uncrawledUrls, u)
+				newUrls = append(newUrls, u)
 			}
 			urlsToResolve := []*url.URL{}
 			for _, u := range newUrls {
