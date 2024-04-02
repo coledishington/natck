@@ -190,7 +190,6 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		pendingResolutions.put(u)
 	}
 
-	keepAliveRequestsInWindow := 0
 	activeConns := make([]*connection, 0)
 	for {
 		var lookupAddrSemC chan<- struct{} = nil
@@ -247,13 +246,6 @@ func MeasureMaxConnections(urls []*url.URL) int {
 
 			if len(pendingConns) > 0 && pendingConns[0] == c {
 				pendingConns = pendingConns[1:]
-			}
-
-			// Track how many of the last 10 scraps were for an existing connection
-			if len(c.crawledUrls) > 0 {
-				keepAliveRequestsInWindow = min(keepAliveRequestsInWindow+1, 10)
-			} else {
-				keepAliveRequestsInWindow = max(keepAliveRequestsInWindow-1, 0)
 			}
 
 			c.lastRequest = time.Now()
