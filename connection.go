@@ -83,6 +83,13 @@ func indexKeepAliveConnection(conns []*connection) int {
 	})
 }
 
+func indexUrlByHostPort(urls []*url.URL, needle *url.URL) int {
+	hostPort := canonicalHost(needle)
+	return slices.IndexFunc(urls, func(u *url.URL) bool {
+		return canonicalHost(u) == hostPort
+	})
+}
+
 func indexConnectionById(conns []*connection, needle uint) int {
 	return slices.IndexFunc(conns, func(c *connection) bool {
 		return c.id == needle
@@ -181,7 +188,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 
 	uniqueUrls := []*url.URL{}
 	for _, u := range urls {
-		if sliceContainsUrl(uniqueUrls, u) {
+		if i := indexUrlByHostPort(uniqueUrls, u); i != -1 {
 			continue
 		}
 		uniqueUrls = append(uniqueUrls, u)
@@ -268,8 +275,10 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 			urlsToResolve := []*url.URL{}
 			for _, u := range newUrls {
-				i := indexConnectionByHostPort(pendingConns, u)
-				if i != -1 {
+				if i := indexUrlByHostPort(urlsToResolve, u); i != -1 {
+					continue
+				}
+				if i := indexConnectionByHostPort(pendingConns, u); i != -1 {
 					continue
 				}
 				urlsToResolve = append(urlsToResolve, u)
