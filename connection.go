@@ -51,7 +51,7 @@ func (q *lookupQueue) pop() *url.URL {
 		return u
 	}
 
-	q.urls = append(q.urls[1:], q.urls[0])
+	q.urls = append(q.urls[1:], q.urls[0][1:])
 	return u
 }
 
