@@ -261,32 +261,6 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				return -1
 			}
 
-			newUrls := []*url.URL{}
-			for _, u := range reply.scrapedUrls {
-				if i := indexConnectionByHostPort(activeConns, u); i != -1 {
-					c := activeConns[i]
-					if !sliceContainsUrl(c.uncrawledUrls, u) || !sliceContainsUrl(c.crawledUrls, u) {
-						c.uncrawledUrls = append(c.uncrawledUrls, u)
-					}
-					continue
-				}
-
-				newUrls = append(newUrls, u)
-			}
-			urlsToResolve := []*url.URL{}
-			for _, u := range newUrls {
-				if i := indexUrlByHostPort(urlsToResolve, u); i != -1 {
-					continue
-				}
-				if i := indexConnectionByHostPort(pendingConns, u); i != -1 {
-					continue
-				}
-				urlsToResolve = append(urlsToResolve, u)
-			}
-			if len(urlsToResolve) > 0 {
-				pendingResolutions.put(urlsToResolve...)
-			}
-
 			var c *connection
 			if i := indexConnectionById(activeConns, reply.connId); i != -1 {
 				c = activeConns[i]
@@ -316,6 +290,33 @@ func MeasureMaxConnections(urls []*url.URL) int {
 
 			if !sliceContainsUrl(c.crawledUrls, reply.url) {
 				c.crawledUrls = append(c.crawledUrls, reply.url)
+			}
+
+			// Determine where to put the newly scraped urls
+			newUrls := []*url.URL{}
+			for _, u := range reply.scrapedUrls {
+				if i := indexConnectionByHostPort(activeConns, u); i != -1 {
+					c := activeConns[i]
+					if !sliceContainsUrl(c.uncrawledUrls, u) && !sliceContainsUrl(c.crawledUrls, u) {
+						c.uncrawledUrls = append(c.uncrawledUrls, u)
+					}
+					continue
+				}
+
+				newUrls = append(newUrls, u)
+			}
+			urlsToResolve := []*url.URL{}
+			for _, u := range newUrls {
+				if i := indexUrlByHostPort(urlsToResolve, u); i != -1 {
+					continue
+				}
+				if i := indexConnectionByHostPort(pendingConns, u); i != -1 {
+					continue
+				}
+				urlsToResolve = append(urlsToResolve, u)
+			}
+			if len(urlsToResolve) > 0 {
+				pendingResolutions.put(urlsToResolve...)
 			}
 		}
 
