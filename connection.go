@@ -20,6 +20,7 @@ type connection struct {
 	client        *http.Client
 	url           *url.URL
 	uncrawledUrls []*url.URL
+	crawlingUrls  []*url.URL
 	crawledUrls   []*url.URL
 	lastRequest   time.Time
 	lastReply     time.Time
@@ -80,6 +81,18 @@ func indexUrls(urls []*url.URL, needle *url.URL) int {
 func indexKeepAliveConnection(conns []*connection) int {
 	return slices.IndexFunc(conns, func(c *connection) bool {
 		return time.Since(c.lastReply) > 3500*time.Millisecond && time.Since(c.lastRequest) > 1000*time.Millisecond
+	})
+}
+
+func MaxKeepAliveWithMoreToCrawlConnection(conns []*connection) *connection {
+	return slices.MaxFunc(conns, func(c1, c2 *connection) int {
+		if len(c1.uncrawledUrls) == 0 {
+			return -1
+		}
+		if len(c2.uncrawledUrls) == 0 {
+			return +1
+		}
+		return c1.lastReply.Compare(c2.lastReply)
 	})
 }
 
@@ -147,7 +160,7 @@ func makeConnection(addr netip.AddrPort, target *url.URL) *connection {
 	return c
 }
 
-func getNextConnection(pendingConns, activeConns []*connection) *connection {
+func getNextConnection(pendingConns, activeConns []*connection, freeWorkers int) *connection {
 	if i := indexKeepAliveConnection(activeConns); i != -1 {
 		// Prioritise existing connections to avoid http keep-alive
 		// or NAT mapping expires
@@ -155,6 +168,13 @@ func getNextConnection(pendingConns, activeConns []*connection) *connection {
 	}
 	if len(pendingConns) > 0 {
 		return pendingConns[0]
+	}
+	if freeWorkers > 0 && len(activeConns) > 0 {
+		// If there are free workers and uncrawled urls, increase crawl
+		// freqency to try to find new hosts
+		if c := MaxKeepAliveWithMoreToCrawlConnection(activeConns); len(c.uncrawledUrls) > 0 {
+			return c
+		}
 	}
 	return nil
 }
@@ -207,7 +227,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		}
 
 		var request *roundtrip = nil
-		c := getNextConnection(pendingConns, activeConns)
+		c := getNextConnection(pendingConns, activeConns, workerLimit-len(semC))
 		if c != nil {
 			target := c.url
 			if len(c.uncrawledUrls) > 0 {
@@ -246,6 +266,12 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			pendingConns = append(pendingConns, c)
 			connectionIdCtr++
 		case scrapRequestSemC <- struct{}{}:
+			// Adjust uncrawled urls
+			if i := indexUrls(c.uncrawledUrls, request.url); i != -1 {
+				c.uncrawledUrls = slices.Delete(c.uncrawledUrls, i, i+1)
+			}
+			c.crawlingUrls = append(c.crawlingUrls, request.url)
+
 			go func() {
 				scrapConnectionRequest(request, scrapedReply, stopC)
 				<-semC
@@ -266,8 +292,8 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				c = activeConns[i]
 
 				// Adjust uncrawled urls
-				if j := indexUrls(c.uncrawledUrls, reply.url); j != -1 {
-					c.uncrawledUrls = slices.Delete(c.uncrawledUrls, j, j+1)
+				if j := indexUrls(c.crawlingUrls, reply.url); j != -1 {
+					c.crawlingUrls = slices.Delete(c.crawlingUrls, j, j+1)
 				}
 
 				if reply.failed {
@@ -277,6 +303,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				c = &connection{
 					id: reply.connId, client: reply.client, url: reply.url,
 					uncrawledUrls: []*url.URL{},
+					crawlingUrls:  []*url.URL{},
 					crawledUrls:   []*url.URL{reply.url},
 					host:          reply.host,
 				}
@@ -297,7 +324,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			for _, u := range reply.scrapedUrls {
 				if i := indexConnectionByHostPort(activeConns, u); i != -1 {
 					c := activeConns[i]
-					if !sliceContainsUrl(c.uncrawledUrls, u) && !sliceContainsUrl(c.crawledUrls, u) {
+					if !sliceContainsUrl(c.uncrawledUrls, u) && !sliceContainsUrl(c.crawlingUrls, u) && !sliceContainsUrl(c.crawledUrls, u) {
 						c.uncrawledUrls = append(c.uncrawledUrls, u)
 					}
 					continue
@@ -321,14 +348,14 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		}
 
 		if len(pendingConns) == 0 && len(pendingResolutions.urls) == 0 && len(semC) == 0 {
-			haveUncrawledUrls := false
+			haveMoreUrls := false
 			for _, c := range activeConns {
-				haveUncrawledUrls = len(c.uncrawledUrls) > 0
-				if haveUncrawledUrls {
+				haveMoreUrls = len(c.uncrawledUrls)+len(c.crawlingUrls) > 0
+				if haveMoreUrls {
 					break
 				}
 			}
-			if !haveUncrawledUrls {
+			if !haveMoreUrls {
 				break
 			}
 		}
