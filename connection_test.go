@@ -113,11 +113,22 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 
 	handler := http.FileServer(http.Dir(dir))
 
+	// Bind to port to make sure the server is ready to
+	// accept connections immediately
+	listenStr := fmt.Sprint(":", tSrv.port)
+	listenAddr, err := net.ResolveTCPAddr("tcp", listenStr)
+	if err != nil {
+		t.Errorf("Failed to resolve tcp address %v: %v", listenStr, err)
+	}
+	listener, err := net.ListenTCP("tcp", listenAddr)
+	if err != nil {
+		t.Errorf("Failed to listen on tcp port %v: %v", tSrv.port, err)
+	}
+
 	// Example Http keep-alive defaults, in seconds, are Apache(5),
 	// Cloudflare(900), GFE(610), LiteSpeed(5s), Microsoft-IIS(120),
 	// and nginx(75).
 	tSrv.server = &http.Server{
-		Addr:      fmt.Sprint(":", tSrv.port),
 		ConnState: statsCb,
 		Handler: HandlerWrapper{
 			redirectCode: tSrv.redirectCode,
@@ -136,7 +147,7 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	})
 
 	go func() {
-		err := tSrv.server.ListenAndServe()
+		err := tSrv.server.Serve(listener)
 		if err != nil && err != http.ErrServerClosed {
 			t.Errorf("Unexpected shutdown of http server on port %v: %v", tSrv.port, err)
 		}
