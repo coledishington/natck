@@ -2,12 +2,16 @@ package main
 
 import (
 	"fmt"
+	"html/template"
 	"io"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +24,6 @@ type httpServerStats struct {
 
 type httpTestServer struct {
 	server       *http.Server
-	testdata     string
 	port         int
 	replyLatency time.Duration
 	redirectCode int
@@ -47,9 +50,20 @@ func (h HandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	h.wrapped.ServeHTTP(res, req)
 }
 
-func tPath(p ...string) string {
-	p = append([]string{"testdata"}, p...)
-	return path.Join(p...)
+func Atoi(t *testing.T, s string) int {
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		t.Fatalf("Atoi failed to parse %v as int: %v", s, err)
+	}
+	return i
+}
+
+func createFile(t *testing.T, path string) *os.File {
+	dst, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
+	if err != nil {
+		t.Fatalf("cpFile failed to open new file %v: %v", path, err)
+	}
+	return dst
 }
 
 func cpFile(t *testing.T, sPath, dPath string) {
@@ -59,10 +73,7 @@ func cpFile(t *testing.T, sPath, dPath string) {
 	}
 	defer src.Close()
 
-	dst, err := os.OpenFile(dPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0666)
-	if err != nil {
-		t.Fatal("cpFile failed to open dst:", err)
-	}
+	dst := createFile(t, dPath)
 	defer dst.Close()
 
 	buf := make([]byte, os.Getpagesize())
@@ -85,23 +96,51 @@ func cpFile(t *testing.T, sPath, dPath string) {
 	}
 }
 
+func tPath(p ...string) string {
+	p = append([]string{"testdata"}, p...)
+	return path.Join(p...)
+}
+
+func tUrl(t *testing.T, port int, path string) *url.URL {
+	s := fmt.Sprintf("http://127.0.0.1:%v/%v", port, path)
+	u, err := url.Parse(s)
+	if err != nil {
+		t.Fatalf("Failed to parse url %v: %v", s, err)
+	}
+	return u
+}
+
+func makeHtmlDocWithLinks(t *testing.T, urls []*url.URL, dPath string) {
+	doc := `<!doctype html>
+<html lang="en-US">
+<head></head>
+<body>
+	<ul>
+		{{range .}}
+		<li>
+			<a href="{{print .String}}">{{.Host}}</a>
+		</li>
+		{{end}}
+	</ul>
+</body>
+</html>`
+
+	tpl := template.Must(template.New("doc").Parse(doc))
+	dst := createFile(t, dPath)
+	defer dst.Close()
+	err := tpl.ExecuteTemplate(dst, "doc", urls)
+	if err != nil {
+		t.Fatal("Failed to fill in html template:", err)
+	}
+}
+
 // startHttpServer Starts an http server, raising a test error if
 // any issue occurs. This server is setup over localhost, so in
 // effect the client and server are one hop from each other, with
 // no NAT between them. This can provide test coverage for
 // simple cases whilst avoiding platform-specific
 // network infrastructure.
-func startHttpServer(t *testing.T, tSrv *httpTestServer) {
-	dir := t.TempDir()
-	t.Cleanup(func() {
-		err := os.RemoveAll(dir)
-		if err != nil {
-			t.Errorf("Failed to cleanup root directory of http server on port %v: %v", tSrv.port, err)
-		}
-	})
-
-	cpFile(t, tSrv.testdata, path.Join(dir, "index.html"))
-
+func startHttpServer(t *testing.T, tSrv *httpTestServer, root string) {
 	stats := &tSrv.stats
 	statsCb := func(c net.Conn, s http.ConnState) {
 		stats.m.Lock()
@@ -111,7 +150,7 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 		}
 	}
 
-	handler := http.FileServer(http.Dir(dir))
+	handler := http.FileServer(http.Dir(root))
 
 	// Bind to port to make sure the server is ready to
 	// accept connections immediately
@@ -154,10 +193,6 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	}()
 }
 
-func tUrl(port int) string {
-	return fmt.Sprintf("http://127.0.0.1:%v/index.html", port)
-}
-
 func TestMeasureMaxConnections(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
@@ -197,11 +232,7 @@ func TestMeasureMaxConnections(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			urls := []*url.URL{}
 			for _, port := range tc.inPorts {
-				u, err := url.Parse(tUrl(port))
-				if err != nil {
-					t.Fatal("Test url failed to parse")
-				}
-				urls = append(urls, u)
+				urls = append(urls, tUrl(t, port, "index.html"))
 			}
 
 			portToNConns := make(map[int]int, 0)
@@ -222,16 +253,17 @@ func TestMeasureMaxConnections(t *testing.T) {
 					redirectCode = http.StatusMovedPermanently
 				}
 				httpServers = append(httpServers, &httpTestServer{
-					testdata:     tPath("no_links.html"),
 					port:         p,
 					replyLatency: tc.inPortLatency[p],
 					redirectCode: redirectCode,
-					redirectTo:   tUrl(redirectPort),
+					redirectTo:   tUrl(t, redirectPort, "index.html").String(),
 				})
 			}
 
 			for _, srv := range httpServers {
-				startHttpServer(t, srv)
+				root := t.TempDir()
+				cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
+				startHttpServer(t, srv, root)
 			}
 
 			nConns := MeasureMaxConnections(urls)
@@ -261,6 +293,169 @@ func TestMeasureMaxConnections(t *testing.T) {
 	}
 }
 
+func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
+	var (
+		canterburyPort int = 8081
+		otagoPort          = 8082
+		rakiuraPort        = 8083
+		tasmanPort         = 8084
+		westCoast          = 8085
+	)
+
+	var (
+		// Canterbury
+		HanmerSprings *url.URL = tUrl(t, canterburyPort, "hanmer_springs.html")
+		Kaikoura               = tUrl(t, canterburyPort, "kaikoura.html")
+		Christchurch           = tUrl(t, canterburyPort, "christchurch.html")
+		Rakaia                 = tUrl(t, canterburyPort, "rakaia.html")
+		Ashburton              = tUrl(t, canterburyPort, "ashburton.html")
+		Timaru                 = tUrl(t, canterburyPort, "timaru.html")
+		// Otago
+		Oamaru     = tUrl(t, otagoPort, "oamaru.html")
+		Dunedin    = tUrl(t, otagoPort, "dunedin.html")
+		Queenstown = tUrl(t, otagoPort, "queenstown.html")
+		Wanaka     = tUrl(t, otagoPort, "wanaka.html")
+		// Rakiura
+		StewartIsland = tUrl(t, rakiuraPort, "stewart_island.html")
+		Oban          = tUrl(t, rakiuraPort, "oban.html")
+		// Tasman
+		Takaka      = tUrl(t, tasmanPort, "takaka.html")
+		Collingwood = tUrl(t, tasmanPort, "collingwood.html")
+		Puponga     = tUrl(t, tasmanPort, "puponga.html")
+		Motueka     = tUrl(t, tasmanPort, "motueka.html")
+		Richmond    = tUrl(t, tasmanPort, "richmond.html")
+		Nelson      = tUrl(t, tasmanPort, "nelson.html")
+		Tapawera    = tUrl(t, tasmanPort, "tapawera.html")
+		Murchison   = tUrl(t, tasmanPort, "murchison.html")
+		// West Coast
+		Reefton         = tUrl(t, westCoast, "reefton.html")
+		SpringsJunction = tUrl(t, westCoast, "springs_junction.html")
+	)
+
+	type serverAdjacencies map[*url.URL][]*url.URL
+
+	canterburyAdjacencies := serverAdjacencies{
+		HanmerSprings: {SpringsJunction, Kaikoura, Christchurch},
+		Kaikoura:      {HanmerSprings, Christchurch},
+		Christchurch:  {HanmerSprings, Kaikoura, Rakaia},
+		Rakaia:        {Christchurch, Ashburton},
+		Ashburton:     {Rakaia, Timaru},
+		Timaru:        {Ashburton, Oamaru, Queenstown},
+	}
+
+	otagoAdjacencies := serverAdjacencies{
+		Oamaru:     {Timaru, Dunedin},
+		Dunedin:    {Oamaru, Queenstown},
+		Queenstown: {Dunedin, Wanaka, Timaru},
+		Wanaka:     {Queenstown, Reefton},
+	}
+
+	tasmanAdjacencies := serverAdjacencies{
+		Puponga:     {Collingwood},
+		Collingwood: {Puponga, Takaka},
+		Takaka:      {Collingwood, Motueka},
+		Motueka:     {Takaka, Richmond},
+		Richmond:    {Motueka, Tapawera, Murchison, Nelson},
+		Nelson:      {Richmond},
+		Tapawera:    {Richmond},
+		Murchison:   {Richmond, SpringsJunction},
+	}
+
+	RakiuraAdjacencies := serverAdjacencies{
+		StewartIsland: {Oban},
+		Oban:          {StewartIsland},
+	}
+
+	westCoastAdjacencies := serverAdjacencies{
+		Reefton:         {SpringsJunction, Wanaka},
+		SpringsJunction: {Reefton, Murchison, HanmerSprings},
+	}
+
+	regions := []serverAdjacencies{
+		canterburyAdjacencies,
+		otagoAdjacencies,
+		tasmanAdjacencies,
+		RakiuraAdjacencies,
+		westCoastAdjacencies,
+	}
+
+	testcases := map[string]struct {
+		inUrls       []*url.URL
+		outPortConns []int
+	}{
+		"Start on isolated server": {
+			inUrls:       []*url.URL{StewartIsland},
+			outPortConns: []int{8083},
+		},
+		"Start on surrounded server": {
+			inUrls:       []*url.URL{HanmerSprings},
+			outPortConns: []int{8081, 8082, 8084, 8085},
+		},
+		"Start on outside edge of cyclic shape": {
+			inUrls:       []*url.URL{Kaikoura},
+			outPortConns: []int{8081, 8082, 8084, 8085},
+		},
+		"Start on sparsely linked server": {
+			inUrls:       []*url.URL{Puponga},
+			outPortConns: []int{8081, 8082, 8084, 8085},
+		},
+		"Start on two indirectly linked servers": {
+			inUrls:       []*url.URL{Richmond, Kaikoura},
+			outPortConns: []int{8081, 8082, 8084, 8085},
+		},
+	}
+
+	for name, tc := range testcases {
+		t.Run(name, func(t *testing.T) {
+			httpSrvs := []*httpTestServer{}
+			for _, regionAdjacencies := range regions {
+				var u *url.URL
+
+				root := t.TempDir()
+				for page, links := range regionAdjacencies {
+					u = page
+					base := path.Base(page.Path)
+					filename := strings.TrimPrefix(base, "/")
+					dest := path.Join(root, filename)
+					makeHtmlDocWithLinks(t, links, dest)
+				}
+
+				srv := &httpTestServer{port: Atoi(t, u.Port())}
+				startHttpServer(t, srv, root)
+				httpSrvs = append(httpSrvs, srv)
+			}
+
+			nConns := MeasureMaxConnections(tc.inUrls)
+			if nConns != len(tc.outPortConns) {
+				t.Errorf("expected to measure %d client connections, got %d", len(tc.outPortConns), nConns)
+			}
+
+			for _, srv := range httpSrvs {
+				srv.stats.m.Lock()
+				connections := 0
+				if slices.Contains(tc.outPortConns, srv.port) {
+					connections++
+				}
+				if srv.stats.connections != connections {
+					t.Errorf("expected server on port %d to get %d connections, got %d", srv.port, connections, srv.stats.connections)
+				}
+				srv.stats.m.Unlock()
+			}
+
+			totalConnections := 0
+			for _, srv := range httpSrvs {
+				s := &srv.stats
+				s.m.Lock()
+				totalConnections += s.connections
+				s.m.Unlock()
+			}
+			if totalConnections != len(tc.outPortConns) {
+				t.Errorf("expected the total number of new http server connections to be %d, got %d", len(tc.outPortConns), totalConnections)
+			}
+		})
+	}
+}
+
 func TestMeasureMaxConnectionsBig(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
@@ -269,19 +464,16 @@ func TestMeasureMaxConnectionsBig(t *testing.T) {
 	nConnections := 1000
 	httpSrvs := []*httpTestServer{}
 	for i := 8000; i < 8000+nConnections; i++ {
-		srv := &httpTestServer{testdata: tPath("no_links.html"), port: i, replyLatency: time.Millisecond}
-		startHttpServer(t, srv)
+		root := t.TempDir()
+		cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
+		srv := &httpTestServer{port: i, replyLatency: time.Millisecond}
+		startHttpServer(t, srv, root)
 		httpSrvs = append(httpSrvs, srv)
 	}
 
 	urls := []*url.URL{}
 	for i := 8000; i < 8000+nConnections; i++ {
-		ln := fmt.Sprintf("http://localhost:%v/index.html", i)
-		u, err := url.Parse(ln)
-		if err != nil {
-			t.Fatal("Test url failed to parse", ln)
-		}
-		urls = append(urls, u)
+		urls = append(urls, tUrl(t, i, "index.html"))
 	}
 
 	nConns := MeasureMaxConnections(urls)
