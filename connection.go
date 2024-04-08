@@ -269,23 +269,22 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			pendingConns = append(pendingConns, c)
 			connectionIdCtr++
 		case scrapRequestSemC <- struct{}{}:
+			c.lastRequest = time.Now()
+			go func() {
+				scrapConnectionRequest(request, scrapedReply, stopC)
+				<-semC
+			}()
+
 			// Adjust uncrawled urls
 			if i := indexUrls(c.uncrawledUrls, request.url); i != -1 {
 				c.uncrawledUrls = slices.Delete(c.uncrawledUrls, i, i+1)
 			}
 			c.crawlingUrls = append(c.crawlingUrls, request.url)
 
-			go func() {
-				scrapConnectionRequest(request, scrapedReply, stopC)
-				<-semC
-			}()
-
 			if len(pendingConns) > 0 && pendingConns[0] == c {
 				pendingConns = pendingConns[1:]
 				activeConns = append(activeConns, c)
 			}
-
-			c.lastRequest = time.Now()
 		case reply, ok := <-scrapedReply:
 			if !ok {
 				return -1
