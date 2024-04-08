@@ -199,7 +199,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 	scrapedReply := make(chan *roundtrip)
 	stopC := make(chan struct{})
 
-	workerLimit := len(urls)
+	workerLimit := 10000
 	semC := make(chan struct{}, workerLimit)
 
 	connectionIdCtr := uint(0)
