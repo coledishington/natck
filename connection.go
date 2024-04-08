@@ -282,6 +282,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 
 			if len(pendingConns) > 0 && pendingConns[0] == c {
 				pendingConns = pendingConns[1:]
+				activeConns = append(activeConns, c)
 			}
 
 			c.lastRequest = time.Now()
@@ -291,29 +292,19 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 
 			var c *connection
-			if i := indexConnectionById(activeConns, reply.connId); i != -1 {
-				c = activeConns[i]
+			i := indexConnectionById(activeConns, reply.connId)
+			if i == -1 {
+				break
+			}
 
-				// Adjust uncrawled urls
-				if j := indexUrls(c.crawlingUrls, reply.url); j != -1 {
-					c.crawlingUrls = slices.Delete(c.crawlingUrls, j, j+1)
-				}
+			c = activeConns[i]
+			// Adjust uncrawled urls
+			if j := indexUrls(c.crawlingUrls, reply.url); j != -1 {
+				c.crawlingUrls = slices.Delete(c.crawlingUrls, j, j+1)
+			}
 
-				if reply.failed {
-					activeConns = slices.Delete(activeConns, i, i+1)
-				}
-			} else {
-				c = &connection{
-					id: reply.connId, client: reply.client, url: reply.url,
-					uncrawledUrls: []*url.URL{},
-					crawlingUrls:  []*url.URL{},
-					crawledUrls:   []*url.URL{reply.url},
-					host:          reply.host,
-				}
-
-				if !reply.failed {
-					activeConns = append(activeConns, c)
-				}
+			if reply.failed {
+				activeConns = slices.Delete(activeConns, i, i+1)
 			}
 			c.lastRequest = reply.requestTs
 			c.lastReply = reply.replyTs
