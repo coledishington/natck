@@ -252,6 +252,9 @@ func MeasureMaxConnections(urls []*url.URL) int {
 
 			unusedAddresses := []netip.AddrPort{}
 			for _, address := range h.addresses {
+				if indexConnectionByAddr(pendingConns, address) != -1 {
+					continue
+				}
 				if indexConnectionByAddr(activeConns, address) != -1 {
 					continue
 				}
