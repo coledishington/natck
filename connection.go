@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/netip"
@@ -66,6 +67,15 @@ func urlPort(u *url.URL) string {
 		return port
 	}
 	return schemeToPort[u.Scheme]
+}
+
+func isDialError(err error) bool {
+	var needle *net.OpError
+
+	if !errors.As(err, &needle) {
+		return false
+	}
+	return needle.Op == "dial"
 }
 
 func canonicalHost(u *url.URL) string {
@@ -220,6 +230,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		pendingResolutions.put(u)
 	}
 
+	repeatedDailFails := 0
 	activeConns := make([]*connection, 0)
 	for {
 		var lookupAddrSemC chan<- struct{} = nil
@@ -305,7 +316,15 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				c.crawlingUrls = slices.Delete(c.crawlingUrls, j, j+1)
 			}
 
-			if reply.failed {
+			// Dial errors may signify the middleware NAT device has run out
+			// of ports for this client
+			if isDialError(reply.err) {
+				repeatedDailFails++
+			} else {
+				repeatedDailFails = 0
+			}
+
+			if reply.err != nil {
 				activeConns = slices.Delete(activeConns, i, i+1)
 			}
 			c.lastRequest = reply.requestTs
@@ -343,6 +362,11 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 		}
 
+		if repeatedDailFails >= 5 {
+			// Assume the NAT has exceeded the allowed connections
+			// after repeated dail failures.
+			break
+		}
 		if len(pendingConns) == 0 && len(pendingResolutions.urls) == 0 && len(semC) == 0 {
 			haveMoreUrls := false
 			for _, c := range activeConns {

@@ -22,9 +22,9 @@ type roundtrip struct {
 	host        *host
 	url         *url.URL
 	scrapedUrls []*url.URL
-	failed      bool
 	requestTs   time.Time
 	replyTs     time.Time
+	err         error
 }
 
 func sliceContainsUrl(urls []*url.URL, needle *url.URL) bool {
@@ -76,7 +76,7 @@ func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
 	r.requestTs = time.Now()
 	sUrls, err := scrapHostUrl(ctx, r.client, r.url)
 	r.replyTs = time.Now()
-	r.failed = err != nil
+	r.err = err
 	r.scrapedUrls = sUrls
 	return r
 }

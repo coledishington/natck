@@ -456,6 +456,11 @@ func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
 	}
 }
 
+func TestMeasureMaxConnectionsConvergence(t *testing.T) {
+
+	// TODO: make channel sem for connections allowed over all servers
+}
+
 func TestMeasureMaxConnectionsBig(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
