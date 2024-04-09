@@ -84,14 +84,8 @@ func indexKeepAliveConnection(conns []*connection) int {
 	})
 }
 
-func MaxKeepAliveWithMoreToCrawlConnection(conns []*connection) *connection {
+func MaxLastReplyConnection(conns []*connection) *connection {
 	return slices.MaxFunc(conns, func(c1, c2 *connection) int {
-		if len(c1.uncrawledUrls) == 0 {
-			return -1
-		}
-		if len(c2.uncrawledUrls) == 0 {
-			return +1
-		}
 		return c1.lastReply.Compare(c2.lastReply)
 	})
 }
@@ -172,8 +166,17 @@ func getNextConnection(pendingConns, activeConns []*connection, freeWorkers int)
 	if freeWorkers > 0 && len(activeConns) > 0 {
 		// If there are free workers and uncrawled urls, increase crawl
 		// freqency to try to find new hosts
-		if c := MaxKeepAliveWithMoreToCrawlConnection(activeConns); len(c.uncrawledUrls) > 0 {
-			return c
+		availableToCrawl := []*connection{}
+		for _, c := range activeConns {
+			if len(c.uncrawledUrls) == 0 || time.Since(c.lastRequest) < time.Second {
+				continue
+			}
+			availableToCrawl = append(availableToCrawl, c)
+		}
+		if len(availableToCrawl) > 0 {
+			if c := MaxLastReplyConnection(availableToCrawl); c != nil {
+				return c
+			}
 		}
 	}
 	return nil
