@@ -22,6 +22,7 @@ type connection struct {
 	uncrawledUrls []*url.URL
 	crawlingUrls  []*url.URL
 	crawledUrls   []*url.URL
+	crawlDelay    time.Duration
 	lastRequest   time.Time
 	lastReply     time.Time
 }
@@ -143,9 +144,11 @@ func makeClient() *http.Client {
 
 func makeConnection(addr netip.AddrPort, target *url.URL) *connection {
 	c := &connection{
-		client:        makeClient(),
-		url:           target,
-		uncrawledUrls: []*url.URL{target},
+		client: makeClient(),
+		url:    target,
+		uncrawledUrls: []*url.URL{
+			target,
+		},
 		host: &host{
 			ip:       addr,
 			hostPort: canonicalHost(target),

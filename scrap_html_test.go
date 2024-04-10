@@ -89,6 +89,12 @@ func TestScrap(t *testing.T) {
 				"http://island.nz/hibiscuscoast.html",
 			},
 		},
+		// "wiki": {
+		// 	inHtml: "testdata/wikipedia.html",
+		// 	outUrls: []string{
+		// 		"http://island.nz/auckland.html",
+		// 	},
+		// },
 	}
 
 	host := "http://localhost:8081/"
@@ -99,10 +105,76 @@ func TestScrap(t *testing.T) {
 				t.Fatal("Failed to parse test url: ", err)
 			}
 
-			links := Scrap(u, openFile(t, tc.inHtml))
+			links := ScrapHtml(u, openFile(t, tc.inHtml))
 			slinks := urlsToStrings(links)
 			sort.Strings(slinks)
 			sort.Strings(tc.outUrls)
+
+			// reduced := []*url.URL{}
+			// for _, u := range links {
+			// 	found := false
+			// 	for _, r := range reduced {
+			// 		found = canonicalHost(r) == canonicalHost(u)
+			// 		if found {
+			// 			break
+			// 		}
+			// 	}
+			// 	if found {
+			// 		continue
+			// 	}
+			// 	reduced = append(reduced, u)
+			// }
+			// fmt.Println("---------------- reduced -------------------------------------------")
+			// fmt.Println(reduced)
+			// fmt.Println("-------------------------------------------------------------------")
+
+			// _translate := func(u *url.URL) (netip.AddrPort, error) {
+			// 	portString := urlPort(u)
+			// 	p64, err := strconv.ParseUint(portString, 10, 16)
+			// 	if err != nil {
+			// 		return netip.AddrPort{}, err
+			// 	}
+			// 	p := uint16(p64)
+
+			// 	addrs, err := net.LookupIP(u.Hostname())
+			// 	if len(addrs) == 0 || err != nil {
+			// 		return netip.AddrPort{}, io.ErrClosedPipe
+			// 	}
+			// 	addr := addrs[0]
+
+			// 	addrPort, ok := netip.AddrFromSlice(addr)
+			// 	if !ok {
+			// 		return netip.AddrPort{}, io.ErrClosedPipe
+			// 	}
+			// 	return netip.AddrPortFrom(addrPort, p), nil
+			// }
+
+			// addred := []*url.URL{}
+			// for _, r := range reduced {
+			// 	ra, err := _translate(r)
+			// 	if err != nil {
+			// 		continue
+			// 	}
+			// 	found := false
+			// 	for _, a := range addred {
+			// 		aa, err := _translate(a)
+			// 		if err != nil {
+			// 			found = true
+			// 			break
+			// 		}
+			// 		found = ra == aa
+			// 		if found {
+			// 			break
+			// 		}
+			// 	}
+			// 	if !found {
+			// 		addred = append(addred, r)
+			// 	}
+			// }
+			// fmt.Println("---------------- addred -------------------------------------------")
+			// fmt.Println(addred)
+			// fmt.Println("-----------------------------------------------------------------------")
+
 			if !reflect.DeepEqual(tc.outUrls, slinks) {
 				t.Error("Failed to parse urls out of html: ", tc.outUrls, " != ", slinks)
 			}

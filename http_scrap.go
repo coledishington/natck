@@ -52,7 +52,7 @@ func getUrl(ctx context.Context, client *http.Client, target *url.URL) (*http.Re
 
 func scrapResponse(target *url.URL, resp *http.Response) []*url.URL {
 	// Parse urls from content
-	urls := Scrap(target, resp.Body)
+	urls := ScrapHtml(target, resp.Body)
 
 	// Add url from redirect if it belongs to the same server
 	location, err := resp.Location()
