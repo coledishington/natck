@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/netip"
@@ -15,14 +16,19 @@ import (
 
 type ctxAddrKey struct{}
 
+type relativeUrl struct {
+	// Url fragment is stripped before sending to servers.
+	path, query string
+}
+
 type connection struct {
 	id            uint
 	host          *host
 	url           *url.URL
 	client        *http.Client
-	uncrawledUrls map[string]bool
-	crawlingUrls  map[string]bool
-	crawledUrls   map[string]bool
+	uncrawledUrls map[relativeUrl]bool
+	crawlingUrls  map[relativeUrl]bool
+	crawledUrls   map[relativeUrl]bool
 	lastRequest   time.Time
 	lastReply     time.Time
 }
@@ -67,6 +73,29 @@ func urlPort(u *url.URL) string {
 		return port
 	}
 	return schemeToPort[u.Scheme]
+}
+
+func urlToRelativeUrl(u *url.URL) relativeUrl {
+	p := u.RawPath
+	if p == "" {
+		p = u.Path
+	}
+	return relativeUrl{
+		path:  p,
+		query: u.RawQuery,
+	}
+}
+
+func resolveRelativeUrl(b *url.URL, r relativeUrl) (*url.URL, error) {
+	path := r.path
+	if r.query != "" {
+		path = fmt.Sprintf("%v?%v", path, r.query)
+	}
+	rUrl, err := url.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	return b.ResolveReference(rUrl), nil
 }
 
 func isDialError(err error) bool {
@@ -149,11 +178,11 @@ func makeConnection(addr netip.AddrPort, target *url.URL) *connection {
 	c := &connection{
 		client: makeClient(),
 		url:    target,
-		uncrawledUrls: map[string]bool{
-			target.String(): true,
+		uncrawledUrls: map[relativeUrl]bool{
+			urlToRelativeUrl(target): true,
 		},
-		crawlingUrls: map[string]bool{},
-		crawledUrls:  map[string]bool{},
+		crawlingUrls: map[relativeUrl]bool{},
+		crawledUrls:  map[relativeUrl]bool{},
 		host: &host{
 			ip:       addr,
 			hostPort: canonicalHost(target),
@@ -244,7 +273,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			target := c.url
 			for r := range c.uncrawledUrls {
 				var err error
-				target, err = url.Parse(r)
+				target, err = resolveRelativeUrl(c.url, r)
 				if err != nil {
 					// Shouldn't be possible, try again next time
 					continue
@@ -293,7 +322,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				<-semC
 			}()
 
-			rUrl := request.url.String()
+			rUrl := urlToRelativeUrl(request.url)
 			delete(c.uncrawledUrls, rUrl)
 			c.crawlingUrls[rUrl] = true
 
@@ -312,7 +341,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 
 			c := activeConns[i]
-			rUrl := reply.url.String()
+			rUrl := urlToRelativeUrl(reply.url)
 			delete(c.crawlingUrls, rUrl)
 			c.crawledUrls[rUrl] = true
 			c.lastRequest = reply.requestTs
@@ -335,7 +364,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			for _, u := range reply.scrapedUrls {
 				if i := indexConnectionByHostPort(activeConns, u); i != -1 {
 					c := activeConns[i]
-					r := u.String()
+					r := urlToRelativeUrl(u)
 					_, inCrawling := c.crawlingUrls[r]
 					_, inCrawled := c.crawledUrls[r]
 					if !inCrawling && !inCrawled {
