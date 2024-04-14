@@ -18,11 +18,11 @@ type ctxAddrKey struct{}
 type connection struct {
 	id            uint
 	host          *host
-	client        *http.Client
 	url           *url.URL
-	uncrawledUrls []*url.URL
-	crawlingUrls  []*url.URL
-	crawledUrls   []*url.URL
+	client        *http.Client
+	uncrawledUrls map[string]bool
+	crawlingUrls  map[string]bool
+	crawledUrls   map[string]bool
 	lastRequest   time.Time
 	lastReply     time.Time
 }
@@ -80,12 +80,6 @@ func isDialError(err error) bool {
 
 func canonicalHost(u *url.URL) string {
 	return net.JoinHostPort(u.Hostname(), urlPort(u))
-}
-
-func indexUrls(urls []*url.URL, needle *url.URL) int {
-	return slices.IndexFunc(urls, func(u *url.URL) bool {
-		return *u == *needle
-	})
 }
 
 func indexKeepAliveConnection(conns []*connection) int {
@@ -153,9 +147,13 @@ func makeClient() *http.Client {
 
 func makeConnection(addr netip.AddrPort, target *url.URL) *connection {
 	c := &connection{
-		client:        makeClient(),
-		url:           target,
-		uncrawledUrls: []*url.URL{target},
+		client: makeClient(),
+		url:    target,
+		uncrawledUrls: map[string]bool{
+			target.String(): true,
+		},
+		crawlingUrls: map[string]bool{},
+		crawledUrls:  map[string]bool{},
 		host: &host{
 			ip:       addr,
 			hostPort: canonicalHost(target),
@@ -244,8 +242,14 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		c := getNextConnection(pendingConns, activeConns, workerLimit-len(semC))
 		if c != nil {
 			target := c.url
-			if len(c.uncrawledUrls) > 0 {
-				target = c.uncrawledUrls[0]
+			for r := range c.uncrawledUrls {
+				var err error
+				target, err = url.Parse(r)
+				if err != nil {
+					// Shouldn't be possible, try again next time
+					continue
+				}
+				break
 			}
 			request = &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}
 			scrapRequestSemC = semC
@@ -289,11 +293,9 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				<-semC
 			}()
 
-			// Adjust uncrawled urls
-			if i := indexUrls(c.uncrawledUrls, request.url); i != -1 {
-				c.uncrawledUrls = slices.Delete(c.uncrawledUrls, i, i+1)
-			}
-			c.crawlingUrls = append(c.crawlingUrls, request.url)
+			rUrl := request.url.String()
+			delete(c.uncrawledUrls, rUrl)
+			c.crawlingUrls[rUrl] = true
 
 			if len(pendingConns) > 0 && pendingConns[0] == c {
 				pendingConns = pendingConns[1:]
@@ -304,17 +306,17 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				return -1
 			}
 
-			var c *connection
 			i := indexConnectionById(activeConns, reply.connId)
 			if i == -1 {
 				break
 			}
 
-			c = activeConns[i]
-			// Adjust uncrawled urls
-			if j := indexUrls(c.crawlingUrls, reply.url); j != -1 {
-				c.crawlingUrls = slices.Delete(c.crawlingUrls, j, j+1)
-			}
+			c := activeConns[i]
+			rUrl := reply.url.String()
+			delete(c.crawlingUrls, rUrl)
+			c.crawledUrls[rUrl] = true
+			c.lastRequest = reply.requestTs
+			c.lastReply = reply.replyTs
 
 			// Dial errors may signify the middleware NAT device has run out
 			// of ports for this client
@@ -327,20 +329,17 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			if reply.err != nil {
 				activeConns = slices.Delete(activeConns, i, i+1)
 			}
-			c.lastRequest = reply.requestTs
-			c.lastReply = reply.replyTs
-
-			if !sliceContainsUrl(c.crawledUrls, reply.url) {
-				c.crawledUrls = append(c.crawledUrls, reply.url)
-			}
 
 			// Determine where to put the newly scraped urls
 			newUrls := []*url.URL{}
 			for _, u := range reply.scrapedUrls {
 				if i := indexConnectionByHostPort(activeConns, u); i != -1 {
 					c := activeConns[i]
-					if !sliceContainsUrl(c.uncrawledUrls, u) && !sliceContainsUrl(c.crawlingUrls, u) && !sliceContainsUrl(c.crawledUrls, u) {
-						c.uncrawledUrls = append(c.uncrawledUrls, u)
+					r := u.String()
+					_, inCrawling := c.crawlingUrls[r]
+					_, inCrawled := c.crawledUrls[r]
+					if !inCrawling && !inCrawled {
+						c.uncrawledUrls[r] = true
 					}
 					continue
 				}
