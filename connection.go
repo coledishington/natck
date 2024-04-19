@@ -213,7 +213,7 @@ func getNextConnection(pendingConns, activeConns []*connection, freeWorkers int)
 	}
 	if freeWorkers > 0 && len(activeConns) > 0 {
 		// If there are free workers and uncrawled urls, increase crawl
-		// freqency to try to find new hosts
+		// frequency to try to find new hosts
 		availableToCrawl := []*connection{}
 		for _, c := range activeConns {
 			if len(c.uncrawledUrls) == 0 || time.Since(c.lastRequest) < time.Second {
@@ -242,6 +242,16 @@ func getNextUrlToCrawl(c *connection) *url.URL {
 		break
 	}
 	return target
+}
+
+func makeCrawlRequest(c *connection) *roundtrip {
+	target := getNextUrlToCrawl(c)
+	return &roundtrip{
+		connId: c.id,
+		client: c.client,
+		url:    target,
+		host:   c.host,
+	}
 }
 
 func lookupAddrRequest(h *url.URL, resolvedAddr chan<- *resolvedUrl, cancel <-chan struct{}) {
@@ -286,11 +296,8 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			lookupAddrSemC = semC
 		}
 
-		var request *roundtrip = nil
-		c := getNextConnection(pendingConns, activeConns, workerLimit-len(semC))
-		if c != nil {
-			target := getNextUrlToCrawl(c)
-			request = &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}
+		crawlConnection := getNextConnection(pendingConns, activeConns, workerLimit-len(semC))
+		if crawlConnection != nil {
 			scrapRequestSemC = semC
 		}
 
@@ -319,19 +326,20 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			pendingConns = append(pendingConns, c)
 			connectionIdCtr++
 		case scrapRequestSemC <- struct{}{}:
-			c.lastRequest = time.Now()
+			request := makeCrawlRequest(crawlConnection)
+			crawlConnection.lastRequest = time.Now()
 			go func() {
 				scrapConnectionRequest(request, scrapedReply, stopC)
 				<-semC
 			}()
 
 			rUrl := urlToRelativeUrl(request.url)
-			delete(c.uncrawledUrls, rUrl)
-			c.crawlingUrls[rUrl] = true
+			delete(crawlConnection.uncrawledUrls, rUrl)
+			crawlConnection.crawlingUrls[rUrl] = true
 
-			if len(pendingConns) > 0 && pendingConns[0] == c {
+			if len(pendingConns) > 0 && pendingConns[0] == crawlConnection {
 				pendingConns = pendingConns[1:]
-				activeConns = append(activeConns, c)
+				activeConns = append(activeConns, crawlConnection)
 			}
 		case reply, ok := <-scrapedReply:
 			if !ok {
