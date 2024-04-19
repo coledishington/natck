@@ -117,7 +117,7 @@ func indexKeepAliveConnection(conns []*connection) int {
 	})
 }
 
-func MaxLastReplyConnection(conns []*connection) *connection {
+func maxLastReplyConnection(conns []*connection) *connection {
 	return slices.MaxFunc(conns, func(c1, c2 *connection) int {
 		return c1.lastReply.Compare(c2.lastReply)
 	})
@@ -147,6 +147,17 @@ func indexConnectionByHostPort(conns []*connection, u *url.URL) int {
 	return slices.IndexFunc(conns, func(c *connection) bool {
 		return c.host.hostPort == hostPort
 	})
+}
+
+func deleteDuplicateUrlsByHostPort(urls []*url.URL) []*url.URL {
+	uniqueUrls := []*url.URL{}
+	for _, u := range urls {
+		if i := indexUrlByHostPort(uniqueUrls, u); i != -1 {
+			continue
+		}
+		uniqueUrls = append(uniqueUrls, u)
+	}
+	return uniqueUrls
 }
 
 func makeClient() *http.Client {
@@ -211,12 +222,26 @@ func getNextConnection(pendingConns, activeConns []*connection, freeWorkers int)
 			availableToCrawl = append(availableToCrawl, c)
 		}
 		if len(availableToCrawl) > 0 {
-			if c := MaxLastReplyConnection(availableToCrawl); c != nil {
+			if c := maxLastReplyConnection(availableToCrawl); c != nil {
 				return c
 			}
 		}
 	}
 	return nil
+}
+
+func getNextUrlToCrawl(c *connection) *url.URL {
+	target := c.url
+	for r := range c.uncrawledUrls {
+		var err error
+		target, err = resolveRelativeUrl(c.url, r)
+		if err != nil {
+			// Shouldn't be possible, try again next time
+			continue
+		}
+		break
+	}
+	return target
 }
 
 func lookupAddrRequest(h *url.URL, resolvedAddr chan<- *resolvedUrl, cancel <-chan struct{}) {
@@ -246,14 +271,8 @@ func MeasureMaxConnections(urls []*url.URL) int {
 	pendingConns := []*connection{}
 	pendingResolutions := lookupQueue{}
 
-	uniqueUrls := []*url.URL{}
+	urls = deleteDuplicateUrlsByHostPort(urls)
 	for _, u := range urls {
-		if i := indexUrlByHostPort(uniqueUrls, u); i != -1 {
-			continue
-		}
-		uniqueUrls = append(uniqueUrls, u)
-	}
-	for _, u := range uniqueUrls {
 		pendingResolutions.put(u)
 	}
 
@@ -270,16 +289,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		var request *roundtrip = nil
 		c := getNextConnection(pendingConns, activeConns, workerLimit-len(semC))
 		if c != nil {
-			target := c.url
-			for r := range c.uncrawledUrls {
-				var err error
-				target, err = resolveRelativeUrl(c.url, r)
-				if err != nil {
-					// Shouldn't be possible, try again next time
-					continue
-				}
-				break
-			}
+			target := getNextUrlToCrawl(c)
 			request = &roundtrip{connId: c.id, client: c.client, url: target, host: c.host}
 			scrapRequestSemC = semC
 		}
@@ -297,21 +307,14 @@ func MeasureMaxConnections(urls []*url.URL) int {
 				return -1
 			}
 
-			unusedAddresses := []netip.AddrPort{}
-			for _, address := range h.addresses {
-				if indexConnectionByAddr(pendingConns, address) != -1 {
-					continue
-				}
-				if indexConnectionByAddr(activeConns, address) != -1 {
-					continue
-				}
-				unusedAddresses = append(unusedAddresses, address)
-			}
-			if len(unusedAddresses) == 0 {
+			i := slices.IndexFunc(h.addresses, func(a netip.AddrPort) bool {
+				return indexConnectionByAddr(pendingConns, a) == -1 &&
+					indexConnectionByAddr(activeConns, a) == -1
+			})
+			if i == -1 {
 				break
 			}
-
-			c := makeConnection(unusedAddresses[0], h.url)
+			c := makeConnection(h.addresses[i], h.url)
 			c.id = connectionIdCtr
 			pendingConns = append(pendingConns, c)
 			connectionIdCtr++
@@ -396,13 +399,9 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			break
 		}
 		if len(pendingConns) == 0 && len(pendingResolutions.urls) == 0 && len(semC) == 0 {
-			haveMoreUrls := false
-			for _, c := range activeConns {
-				haveMoreUrls = len(c.uncrawledUrls)+len(c.crawlingUrls) > 0
-				if haveMoreUrls {
-					break
-				}
-			}
+			haveMoreUrls := slices.ContainsFunc(activeConns, func(c *connection) bool {
+				return len(c.uncrawledUrls)+len(c.crawlingUrls) > 0
+			})
 			if !haveMoreUrls {
 				break
 			}
