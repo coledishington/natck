@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+const reRequestInterval = 3500 * time.Millisecond
+
 type ctxAddrKey struct{}
 
 type relativeUrl struct {
@@ -29,6 +31,7 @@ type connection struct {
 	uncrawledUrls map[relativeUrl]bool
 	crawlingUrls  map[relativeUrl]bool
 	crawledUrls   map[relativeUrl]bool
+	crawlDelay    time.Duration
 	lastRequest   time.Time
 	lastReply     time.Time
 }
@@ -113,7 +116,7 @@ func canonicalHost(u *url.URL) string {
 
 func indexKeepAliveConnection(conns []*connection) int {
 	return slices.IndexFunc(conns, func(c *connection) bool {
-		return time.Since(c.lastReply) > 3500*time.Millisecond && time.Since(c.lastRequest) > 1000*time.Millisecond
+		return time.Since(c.lastReply) > reRequestInterval && time.Since(c.lastRequest) > c.crawlDelay
 	})
 }
 
@@ -190,6 +193,7 @@ func makeConnection(addr netip.AddrPort, target *url.URL) *connection {
 		client: makeClient(),
 		url:    target,
 		uncrawledUrls: map[relativeUrl]bool{
+			{path: "/robots.txt"}:    true,
 			urlToRelativeUrl(target): true,
 		},
 		crawlingUrls: map[relativeUrl]bool{},
@@ -198,6 +202,7 @@ func makeConnection(addr netip.AddrPort, target *url.URL) *connection {
 			ip:       addr,
 			hostPort: canonicalHost(target),
 		},
+		crawlDelay: reRequestInterval,
 	}
 	return c
 }
@@ -216,7 +221,7 @@ func getNextConnection(pendingConns, activeConns []*connection, freeWorkers int)
 		// frequency to try to find new hosts
 		availableToCrawl := []*connection{}
 		for _, c := range activeConns {
-			if len(c.uncrawledUrls) == 0 || time.Since(c.lastRequest) < time.Second {
+			if len(c.uncrawledUrls) == 0 || time.Since(c.lastRequest) < c.crawlDelay {
 				continue
 			}
 			availableToCrawl = append(availableToCrawl, c)
@@ -232,6 +237,17 @@ func getNextConnection(pendingConns, activeConns []*connection, freeWorkers int)
 
 func getNextUrlToCrawl(c *connection) *url.URL {
 	target := c.url
+
+	// Always visit robots.txt first
+	robots := relativeUrl{path: "/robots.txt"}
+	if _, found := c.uncrawledUrls[robots]; found {
+		var err error
+		target, err = resolveRelativeUrl(c.url, robots)
+		if err == nil {
+			return target
+		}
+	}
+
 	for r := range c.uncrawledUrls {
 		var err error
 		target, err = resolveRelativeUrl(c.url, r)
@@ -265,10 +281,11 @@ func stealUrlsForConnections(connections []*connection, urls []*url.URL) []*url.
 func makeCrawlRequest(c *connection) *roundtrip {
 	target := getNextUrlToCrawl(c)
 	return &roundtrip{
-		connId: c.id,
-		client: c.client,
-		url:    target,
-		host:   c.host,
+		connId:     c.id,
+		client:     c.client,
+		url:        target,
+		host:       c.host,
+		crawlDelay: c.crawlDelay,
 	}
 }
 
@@ -373,6 +390,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			rUrl := urlToRelativeUrl(reply.url)
 			delete(c.crawlingUrls, rUrl)
 			c.crawledUrls[rUrl] = true
+			c.crawlDelay = reply.crawlDelay
 			c.lastRequest = reply.requestTs
 			c.lastReply = reply.replyTs
 
@@ -411,6 +429,11 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			break
 		}
 		if len(pendingConns) == 0 && len(pendingResolutions.urls) == 0 && len(semC) == 0 {
+			for _, c := range activeConns {
+				if len(c.uncrawledUrls)+len(c.crawlingUrls) > 0 {
+					break
+				}
+			}
 			haveMoreUrls := slices.ContainsFunc(activeConns, func(c *connection) bool {
 				return len(c.uncrawledUrls)+len(c.crawlingUrls) > 0
 			})

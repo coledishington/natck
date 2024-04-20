@@ -1,0 +1,7 @@
+User-agent: GPTBot
+Disallow: /
+Crawl-delay: 10
+
+# Commented out agent
+# User-agent: *
+# Crawl-delay: 1

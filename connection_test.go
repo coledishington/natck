@@ -262,6 +262,7 @@ func TestMeasureMaxConnections(t *testing.T) {
 
 			for _, srv := range httpServers {
 				root := t.TempDir()
+				cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
 				cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
 				startHttpServer(t, srv, root)
 			}
@@ -412,6 +413,7 @@ func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
 				var u *url.URL
 
 				root := t.TempDir()
+				cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
 				for page, links := range regionAdjacencies {
 					u = page
 					base := path.Base(page.Path)
@@ -465,6 +467,7 @@ func TestMeasureMaxConnectionsBig(t *testing.T) {
 	httpSrvs := []*httpTestServer{}
 	for i := 8000; i < 8000+nConnections; i++ {
 		root := t.TempDir()
+		cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
 		cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
 		srv := &httpTestServer{port: i, replyLatency: time.Millisecond}
 		startHttpServer(t, srv, root)

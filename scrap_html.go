@@ -75,7 +75,7 @@ func findBaseHrefInNode(n *html.Node) (*url.URL, error) {
 	return findHref(base)
 }
 
-func Scrap(host *url.URL, body io.Reader) []*url.URL {
+func ScrapHtml(host *url.URL, body io.Reader) []*url.URL {
 	urls := []*url.URL{}
 	doc, err := html.Parse(body)
 	if err != nil {

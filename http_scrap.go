@@ -4,10 +4,12 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -21,10 +23,11 @@ type roundtrip struct {
 	client      *http.Client
 	host        *host
 	url         *url.URL
-	scrapedUrls []*url.URL
+	err         error
 	requestTs   time.Time
 	replyTs     time.Time
-	err         error
+	scrapedUrls []*url.URL
+	crawlDelay  time.Duration
 }
 
 func sliceContainsUrl(urls []*url.URL, needle *url.URL) bool {
@@ -50,33 +53,36 @@ func getUrl(ctx context.Context, client *http.Client, target *url.URL) (*http.Re
 	return resp, err
 }
 
-func scrapResponse(target *url.URL, resp *http.Response) []*url.URL {
-	// Parse urls from content
-	urls := Scrap(target, resp.Body)
+func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
+	var resp *http.Response
+
+	r.requestTs = time.Now()
+	resp, r.err = getUrl(ctx, r.client, r.url)
+	r.replyTs = time.Now()
+	if r.err != nil {
+		return r
+	}
+	defer resp.Body.Close()
+
+	urls := []*url.URL{}
 
 	// Add url from redirect if it belongs to the same server
 	location, err := resp.Location()
 	if err == nil && !sliceContainsUrl(urls, location) {
 		urls = append(urls, location)
 	}
-	return urls
-}
 
-func scrapHostUrl(ctx context.Context, client *http.Client, target *url.URL) ([]*url.URL, error) {
-	resp, err := getUrl(ctx, client, target)
-	if err != nil {
-		return nil, err
+	if strings.HasSuffix(r.url.String(), "robots.txt") {
+		if crawlDelay, found := scrapRobotsTxt(resp.Body); found {
+			r.crawlDelay = crawlDelay
+		}
+	} else if strings.HasSuffix(r.url.String(), ".html") {
+		sUrls := ScrapHtml(r.url, resp.Body)
+		urls = append(sUrls, urls...)
+	} else {
+		// Persistent connections need to have the body read
+		io.ReadAll(resp.Body)
 	}
-	defer resp.Body.Close()
-
-	return scrapResponse(target, resp), nil
-}
-
-func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
-	r.requestTs = time.Now()
-	sUrls, err := scrapHostUrl(ctx, r.client, r.url)
-	r.replyTs = time.Now()
-	r.err = err
-	r.scrapedUrls = sUrls
+	r.scrapedUrls = urls
 	return r
 }

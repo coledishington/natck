@@ -1,0 +1,7 @@
+User-agent: Googlebot
+Disallow: /
+Crawl-delay: 10
+
+User-agent: *
+Disallow: /
+Crawl-delay: 0.000001 # 1us

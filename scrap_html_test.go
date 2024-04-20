@@ -99,7 +99,7 @@ func TestScrap(t *testing.T) {
 				t.Fatal("Failed to parse test url: ", err)
 			}
 
-			links := Scrap(u, openFile(t, tc.inHtml))
+			links := ScrapHtml(u, openFile(t, tc.inHtml))
 			slinks := urlsToStrings(links)
 			sort.Strings(slinks)
 			sort.Strings(tc.outUrls)
