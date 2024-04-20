@@ -244,6 +244,24 @@ func getNextUrlToCrawl(c *connection) *url.URL {
 	return target
 }
 
+func stealUrlsForConnections(connections []*connection, urls []*url.URL) []*url.URL {
+	unusedUrls := []*url.URL{}
+	for _, u := range urls {
+		if i := indexConnectionByHostPort(connections, u); i != -1 {
+			c := connections[i]
+			r := urlToRelativeUrl(u)
+			_, inCrawling := c.crawlingUrls[r]
+			_, inCrawled := c.crawledUrls[r]
+			if !inCrawling && !inCrawled {
+				c.uncrawledUrls[r] = true
+			}
+			continue
+		}
+		unusedUrls = append(unusedUrls, u)
+	}
+	return unusedUrls
+}
+
 func makeCrawlRequest(c *connection) *roundtrip {
 	target := getNextUrlToCrawl(c)
 	return &roundtrip{
@@ -371,21 +389,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 
 			// Determine where to put the newly scraped urls
-			newUrls := []*url.URL{}
-			for _, u := range reply.scrapedUrls {
-				if i := indexConnectionByHostPort(activeConns, u); i != -1 {
-					c := activeConns[i]
-					r := urlToRelativeUrl(u)
-					_, inCrawling := c.crawlingUrls[r]
-					_, inCrawled := c.crawledUrls[r]
-					if !inCrawling && !inCrawled {
-						c.uncrawledUrls[r] = true
-					}
-					continue
-				}
-
-				newUrls = append(newUrls, u)
-			}
+			newUrls := stealUrlsForConnections(activeConns, reply.scrapedUrls)
 			urlsToResolve := []*url.URL{}
 			for _, u := range newUrls {
 				if i := indexUrlByHostPort(urlsToResolve, u); i != -1 {
