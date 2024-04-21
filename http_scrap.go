@@ -53,6 +53,23 @@ func getUrl(ctx context.Context, client *http.Client, target *url.URL) (*http.Re
 	return resp, err
 }
 
+func isReponseRobotstxt(resp *http.Response) bool {
+	ctype := resp.Header["Content-Type"]
+	isPlainText := len(ctype) > 0 &&
+		strings.HasPrefix(ctype[0], "text/plain;")
+	u := resp.Request.URL.String()
+	return strings.HasSuffix(u, "robots.txt") && isPlainText
+}
+
+func isResponseHtml(resp *http.Response) bool {
+	ctype := resp.Header["Content-Type"]
+	if len(ctype) == 0 {
+		return strings.HasSuffix(resp.Request.URL.String(), ".html")
+	}
+
+	return strings.HasPrefix(ctype[0], "text/html;")
+}
+
 func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
 	var resp *http.Response
 
@@ -72,11 +89,11 @@ func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
 		urls = append(urls, location)
 	}
 
-	if strings.HasSuffix(r.url.String(), "robots.txt") {
+	if isReponseRobotstxt(resp) {
 		if crawlDelay, found := scrapRobotsTxt(resp.Body); found {
 			r.crawlDelay = crawlDelay
 		}
-	} else if strings.HasSuffix(r.url.String(), ".html") {
+	} else if isResponseHtml(resp) {
 		sUrls := ScrapHtml(r.url, resp.Body)
 		urls = append(sUrls, urls...)
 	} else {

@@ -374,30 +374,44 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 	}
 
 	testcases := map[string]struct {
-		inPreRun  func(t *testing.T, srvs []*httpTestServer)
+		inPreRun  func(t *testing.T, srvs []*httpTestServer) []*url.URL
 		outNConns int
 	}{
 		"no links": {
-			inPreRun: func(t *testing.T, srvs []*httpTestServer) {
+			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
 				srvs[0].server.Handler = HandlerChain{
 					makeFileHandler(makeServerRoot(t, tPath("no_links.html"))),
 				}
+				return []*url.URL{srvs[0].tUrl(t, "index.html")}
 			},
 			outNConns: 1,
 		},
 		"html link": {
-			inPreRun: func(t *testing.T, srvs []*httpTestServer) {
+			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
 				root := makeServerRoot(t)
 				u := srvs[1].tUrl(t, "index.html")
 				makeHtmlDocWithLinks(t, []*url.URL{u}, path.Join(root, "index.html"))
 				srvs[0].server.Handler = HandlerChain{
 					makeFileHandler(root),
 				}
+				return []*url.URL{srvs[0].tUrl(t, "index.html")}
+			},
+			outNConns: 2,
+		},
+		"html link with no .html suffix": {
+			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
+				root := makeServerRoot(t)
+				u := srvs[1].tUrl(t, "MainPage")
+				makeHtmlDocWithLinks(t, []*url.URL{u}, path.Join(root, "MainPage"))
+				srvs[0].server.Handler = HandlerChain{
+					makeFileHandler(root),
+				}
+				return []*url.URL{srvs[0].tUrl(t, "MainPage")}
 			},
 			outNConns: 2,
 		},
 		"redirect": {
-			inPreRun: func(t *testing.T, srvs []*httpTestServer) {
+			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
 				mux := http.NewServeMux()
 
 				// Ensure small Crawl-delay is read from robots.txt
@@ -410,6 +424,7 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 				mux.Handle("/", HandlerChain{h})
 
 				srvs[0].server.Handler = mux
+				return []*url.URL{srvs[0].tUrl(t, "index.html")}
 			},
 			outNConns: 2,
 		},
@@ -429,9 +444,8 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 			root := makeServerRoot(t, tPath("no_links.html"))
 			srvs[1].server.Handler = HandlerChain{makeFileHandler(root)}
 
-			tc.inPreRun(t, srvs)
+			urls := tc.inPreRun(t, srvs)
 
-			urls := []*url.URL{srvs[0].tUrl(t, "index.html")}
 			nConns := MeasureMaxConnections(urls)
 			if nConns != tc.outNConns {
 				t.Errorf("expected to measure %d client connections, got %d", tc.outNConns, nConns)
