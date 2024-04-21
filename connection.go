@@ -387,20 +387,22 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 
 			c := activeConns[i]
+
+			// Dial errors may signify the middleware NAT device has run out
+			// of ports for this client
+			if isDialError(reply.err) {
+				repeatedDailFails++
+			} else if len(c.crawledUrls) == 0 {
+				repeatedDailFails = 0
+			}
+
+			// Add new connections
 			rUrl := urlToRelativeUrl(reply.url)
 			delete(c.crawlingUrls, rUrl)
 			c.crawledUrls[rUrl] = true
 			c.crawlDelay = reply.crawlDelay
 			c.lastRequest = reply.requestTs
 			c.lastReply = reply.replyTs
-
-			// Dial errors may signify the middleware NAT device has run out
-			// of ports for this client
-			if isDialError(reply.err) {
-				repeatedDailFails++
-			} else {
-				repeatedDailFails = 0
-			}
 
 			if reply.err != nil {
 				activeConns = slices.Delete(activeConns, i, i+1)
