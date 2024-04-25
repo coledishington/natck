@@ -340,71 +340,71 @@ func TestCrawlingBehaviour(t *testing.T) {
 
 	var (
 		// Canterbury
-		HanmerSprings *url.URL = tUrl(t, canterburyPort, "hanmer_springs.html")
-		Kaikoura               = tUrl(t, canterburyPort, "kaikoura.html")
-		Christchurch           = tUrl(t, canterburyPort, "christchurch.html")
-		Rakaia                 = tUrl(t, canterburyPort, "rakaia.html")
-		Ashburton              = tUrl(t, canterburyPort, "ashburton.html")
-		Timaru                 = tUrl(t, canterburyPort, "timaru.html")
+		hanmerSprings *url.URL = tUrl(t, canterburyPort, "hanmer_springs.html")
+		kaikoura               = tUrl(t, canterburyPort, "kaikoura.html")
+		christchurch           = tUrl(t, canterburyPort, "christchurch.html")
+		rakaia                 = tUrl(t, canterburyPort, "rakaia.html")
+		ashburton              = tUrl(t, canterburyPort, "ashburton.html")
+		timaru                 = tUrl(t, canterburyPort, "timaru.html")
 		// Otago
-		Oamaru     = tUrl(t, otagoPort, "oamaru.html")
-		Dunedin    = tUrl(t, otagoPort, "dunedin.html")
-		Queenstown = tUrl(t, otagoPort, "queenstown.html")
-		Wanaka     = tUrl(t, otagoPort, "wanaka.html")
+		oamaru     = tUrl(t, otagoPort, "oamaru.html")
+		dunedin    = tUrl(t, otagoPort, "dunedin.html")
+		queenstown = tUrl(t, otagoPort, "queenstown.html")
+		wanaka     = tUrl(t, otagoPort, "wanaka.html")
 		// Rakiura
-		StewartIsland = tUrl(t, rakiuraPort, "stewart_island.html")
-		Oban          = tUrl(t, rakiuraPort, "oban.html")
+		stewartIsland = tUrl(t, rakiuraPort, "stewart_island.html")
+		oban          = tUrl(t, rakiuraPort, "oban.html")
 		// Tasman
-		Takaka      = tUrl(t, tasmanPort, "takaka.html")
-		Collingwood = tUrl(t, tasmanPort, "collingwood.html")
-		Puponga     = tUrl(t, tasmanPort, "puponga.html")
-		Motueka     = tUrl(t, tasmanPort, "motueka.html")
-		Richmond    = tUrl(t, tasmanPort, "richmond.html")
-		Nelson      = tUrl(t, tasmanPort, "nelson.html")
-		Tapawera    = tUrl(t, tasmanPort, "tapawera.html")
-		Murchison   = tUrl(t, tasmanPort, "murchison.html")
+		takaka      = tUrl(t, tasmanPort, "takaka.html")
+		collingwood = tUrl(t, tasmanPort, "collingwood.html")
+		puponga     = tUrl(t, tasmanPort, "puponga.html")
+		motueka     = tUrl(t, tasmanPort, "motueka.html")
+		richmond    = tUrl(t, tasmanPort, "richmond.html")
+		nelson      = tUrl(t, tasmanPort, "nelson.html")
+		tapawera    = tUrl(t, tasmanPort, "tapawera.html")
+		murchison   = tUrl(t, tasmanPort, "murchison.html")
 		// West Coast
-		Reefton         = tUrl(t, westCoast, "reefton.html")
-		SpringsJunction = tUrl(t, westCoast, "springs_junction.html")
+		reefton         = tUrl(t, westCoast, "reefton.html")
+		springsJunction = tUrl(t, westCoast, "springs_junction.html")
 	)
 
 	type serverAdjacencies map[*url.URL][]*url.URL
 
 	canterburyAdjacencies := serverAdjacencies{
-		HanmerSprings: {SpringsJunction, Kaikoura, Christchurch},
-		Kaikoura:      {HanmerSprings, Christchurch},
-		Christchurch:  {HanmerSprings, Kaikoura, Rakaia},
-		Rakaia:        {Christchurch, Ashburton},
-		Ashburton:     {Rakaia, Timaru},
-		Timaru:        {Ashburton, Oamaru, Queenstown},
+		hanmerSprings: {springsJunction, kaikoura, christchurch},
+		kaikoura:      {hanmerSprings, christchurch},
+		christchurch:  {hanmerSprings, kaikoura, rakaia},
+		rakaia:        {christchurch, ashburton},
+		ashburton:     {rakaia, timaru},
+		timaru:        {ashburton, oamaru, queenstown},
 	}
 
 	otagoAdjacencies := serverAdjacencies{
-		Oamaru:     {Timaru, Dunedin},
-		Dunedin:    {Oamaru, Queenstown},
-		Queenstown: {Dunedin, Wanaka, Timaru},
-		Wanaka:     {Queenstown, Reefton},
+		oamaru:     {timaru, dunedin},
+		dunedin:    {oamaru, queenstown},
+		queenstown: {dunedin, wanaka, timaru},
+		wanaka:     {queenstown, reefton},
 	}
 
 	tasmanAdjacencies := serverAdjacencies{
-		Puponga:     {Collingwood},
-		Collingwood: {Puponga, Takaka},
-		Takaka:      {Collingwood, Motueka},
-		Motueka:     {Takaka, Richmond},
-		Richmond:    {Motueka, Tapawera, Murchison, Nelson},
-		Nelson:      {Richmond},
-		Tapawera:    {Richmond},
-		Murchison:   {Richmond, SpringsJunction},
+		puponga:     {collingwood},
+		collingwood: {puponga, takaka},
+		takaka:      {collingwood, motueka},
+		motueka:     {takaka, richmond},
+		richmond:    {motueka, tapawera, murchison, nelson},
+		nelson:      {richmond},
+		tapawera:    {richmond},
+		murchison:   {richmond, springsJunction},
 	}
 
 	RakiuraAdjacencies := serverAdjacencies{
-		StewartIsland: {Oban},
-		Oban:          {StewartIsland},
+		stewartIsland: {oban},
+		oban:          {stewartIsland},
 	}
 
 	westCoastAdjacencies := serverAdjacencies{
-		Reefton:         {SpringsJunction, Wanaka},
-		SpringsJunction: {Reefton, Murchison, HanmerSprings},
+		reefton:         {springsJunction, wanaka},
+		springsJunction: {reefton, murchison, hanmerSprings},
 	}
 
 	regions := []serverAdjacencies{
@@ -420,23 +420,23 @@ func TestCrawlingBehaviour(t *testing.T) {
 		outPortConns []int
 	}{
 		"Start on isolated server": {
-			inUrls:       []*url.URL{StewartIsland},
+			inUrls:       []*url.URL{stewartIsland},
 			outPortConns: []int{8083},
 		},
 		"Start on surrounded server": {
-			inUrls:       []*url.URL{HanmerSprings},
+			inUrls:       []*url.URL{hanmerSprings},
 			outPortConns: []int{8081, 8082, 8084, 8085},
 		},
 		"Start on outside edge of cyclic shape": {
-			inUrls:       []*url.URL{Kaikoura},
+			inUrls:       []*url.URL{kaikoura},
 			outPortConns: []int{8081, 8082, 8084, 8085},
 		},
 		"Start on sparsely linked server": {
-			inUrls:       []*url.URL{Puponga},
+			inUrls:       []*url.URL{puponga},
 			outPortConns: []int{8081, 8082, 8084, 8085},
 		},
 		"Start on two indirectly linked servers": {
-			inUrls:       []*url.URL{Richmond, Kaikoura},
+			inUrls:       []*url.URL{richmond, kaikoura},
 			outPortConns: []int{8081, 8082, 8084, 8085},
 		},
 	}
