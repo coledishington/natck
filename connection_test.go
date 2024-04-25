@@ -17,37 +17,52 @@ import (
 	"time"
 )
 
+// Shortcut making http handlers by avoiding object creation
+type HandlerFunc func(http.ResponseWriter, *http.Request) bool
+type HandlerChain []HandlerFunc
+
 type httpServerStats struct {
 	m           sync.Mutex
 	connections int
 }
 
 type httpTestServer struct {
-	server       *http.Server
-	port         int
-	replyLatency time.Duration
-	redirectCode int
-	redirectTo   string
-	stats        httpServerStats
+	server   *http.Server
+	port     int
+	stats    httpServerStats
+	handlers HandlerChain
 }
 
-type HandlerWrapper struct {
-	latency      time.Duration
-	redirectCode int
-	redirectTo   string
-	wrapped      http.Handler
-}
-
-func (h HandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	if h.latency != 0 {
-		time.Sleep(h.latency)
+func (h HandlerChain) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	for _, handler := range h {
+		more := handler(res, req)
+		if !more {
+			break
+		}
 	}
-	if h.redirectCode != 0 {
+}
+
+func makeFileHandler(root string) HandlerFunc {
+	handler := http.FileServer(http.Dir(root))
+	return func(res http.ResponseWriter, req *http.Request) bool {
+		handler.ServeHTTP(res, req)
+		return false
+	}
+}
+
+func makeLatencyHandler(wait time.Duration) HandlerFunc {
+	return func(res http.ResponseWriter, req *http.Request) bool {
+		time.Sleep(wait)
+		return true
+	}
+}
+
+func makeRedirectHandler(redirectTo string, redirectCode int) HandlerFunc {
+	return func(res http.ResponseWriter, req *http.Request) bool {
 		res.Header()[http.CanonicalHeaderKey("Content-Type")] = nil
-		http.Redirect(res, req, h.redirectTo, h.redirectCode)
-		return
+		http.Redirect(res, req, redirectTo, redirectCode)
+		return false
 	}
-	h.wrapped.ServeHTTP(res, req)
 }
 
 func Atoi(t *testing.T, s string) int {
@@ -140,7 +155,7 @@ func makeHtmlDocWithLinks(t *testing.T, urls []*url.URL, dPath string) {
 // no NAT between them. This can provide test coverage for
 // simple cases whilst avoiding platform-specific
 // network infrastructure.
-func startHttpServer(t *testing.T, tSrv *httpTestServer, root string) {
+func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	stats := &tSrv.stats
 	statsCb := func(c net.Conn, s http.ConnState) {
 		stats.m.Lock()
@@ -149,8 +164,6 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer, root string) {
 			stats.connections++
 		}
 	}
-
-	handler := http.FileServer(http.Dir(root))
 
 	// Bind to port to make sure the server is ready to
 	// accept connections immediately
@@ -167,16 +180,13 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer, root string) {
 	// Example Http keep-alive defaults, in seconds, are Apache(5),
 	// Cloudflare(900), GFE(610), LiteSpeed(5s), Microsoft-IIS(120),
 	// and nginx(75).
-	tSrv.server = &http.Server{
-		ConnState: statsCb,
-		Handler: HandlerWrapper{
-			redirectCode: tSrv.redirectCode,
-			redirectTo:   tSrv.redirectTo,
-			latency:      tSrv.replyLatency,
-			wrapped:      handler,
-		},
-		IdleTimeout: 5 * time.Second,
+	if tSrv.server == nil {
+		tSrv.server = &http.Server{}
 	}
+	tSrv.server.Handler = tSrv.handlers
+	tSrv.server.IdleTimeout = 5 * time.Second
+	tSrv.server.ConnState = statsCb
+	tSrv.server.Addr = listener.Addr().String()
 
 	t.Cleanup(func() {
 		err := tSrv.server.Close()
@@ -247,24 +257,31 @@ func TestSmallTopologyConvergence(t *testing.T) {
 
 			httpServers := []*httpTestServer{}
 			for _, p := range []int{8081, 8082, 8083} {
-				redirectCode := 0
-				redirectPort, exists := tc.inPortRedirect[p]
-				if exists {
-					redirectCode = http.StatusMovedPermanently
+				handlers := HandlerChain{}
+
+				if latency, exists := tc.inPortLatency[p]; exists {
+					handlers = append(handlers, makeLatencyHandler(latency))
 				}
+
+				if redirectPort, exists := tc.inPortRedirect[p]; exists {
+					r := tUrl(t, redirectPort, "index.html").String()
+					h := makeRedirectHandler(r, http.StatusMovedPermanently)
+					handlers = append(handlers, h)
+				}
+
+				root := t.TempDir()
+				cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
+				cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
+				handlers = append(handlers, makeFileHandler(root))
+
 				httpServers = append(httpServers, &httpTestServer{
-					port:         p,
-					replyLatency: tc.inPortLatency[p],
-					redirectCode: redirectCode,
-					redirectTo:   tUrl(t, redirectPort, "index.html").String(),
+					port:     p,
+					handlers: handlers,
 				})
 			}
 
 			for _, srv := range httpServers {
-				root := t.TempDir()
-				cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
-				cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
-				startHttpServer(t, srv, root)
+				startHttpServer(t, srv)
 			}
 
 			nConns := MeasureMaxConnections(urls)
@@ -305,8 +322,15 @@ func TestBigTopologyConvergence(t *testing.T) {
 		root := t.TempDir()
 		cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
 		cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
-		srv := &httpTestServer{port: i, replyLatency: time.Millisecond}
-		startHttpServer(t, srv, root)
+
+		srv := &httpTestServer{
+			port: i,
+			handlers: HandlerChain{
+				makeLatencyHandler(time.Millisecond),
+				makeFileHandler(root),
+			},
+		}
+		startHttpServer(t, srv)
 		httpSrvs = append(httpSrvs, srv)
 	}
 
@@ -457,8 +481,11 @@ func TestCrawlingBehaviour(t *testing.T) {
 					makeHtmlDocWithLinks(t, links, dest)
 				}
 
-				srv := &httpTestServer{port: Atoi(t, u.Port())}
-				startHttpServer(t, srv, root)
+				srv := &httpTestServer{
+					port:     Atoi(t, u.Port()),
+					handlers: HandlerChain{makeFileHandler(root)},
+				}
+				startHttpServer(t, srv)
 				httpSrvs = append(httpSrvs, srv)
 			}
 
