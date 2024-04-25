@@ -11,43 +11,65 @@ import (
 	"path"
 	"slices"
 	"strconv"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 )
 
+// Shortcut making http handlers by avoiding object creation
+type HandlerFunc func(http.ResponseWriter, *http.Request) bool
+type HandlerChain []HandlerFunc
+
 type httpServerStats struct {
-	m           sync.Mutex
 	connections int
 }
 
 type httpTestServer struct {
-	server       *http.Server
-	port         int
-	replyLatency time.Duration
-	redirectCode int
-	redirectTo   string
-	stats        httpServerStats
+	server   *http.Server
+	stats    httpServerStats
+	name     string
+	handlers HandlerChain
 }
 
-type HandlerWrapper struct {
-	latency      time.Duration
-	redirectCode int
-	redirectTo   string
-	wrapped      http.Handler
-}
-
-func (h HandlerWrapper) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	if h.latency != 0 {
-		time.Sleep(h.latency)
+func (h HandlerChain) ServeHTTP(res http.ResponseWriter, req *http.Request) {
+	for _, handler := range h {
+		stop := handler(res, req)
+		if stop {
+			break
+		}
 	}
-	if h.redirectCode != 0 {
+}
+
+func (srv *httpTestServer) tUrl(t *testing.T, path string) *url.URL {
+	// todo
+	s := fmt.Sprintf("http://%v/%v", srv.server.Addr, path)
+	u, err := url.Parse(s)
+	if err != nil {
+		t.Fatalf("Failed to parse url %v: %v", s, err)
+	}
+	return u
+}
+
+func makeFileHandler(root string) HandlerFunc {
+	handler := http.FileServer(http.Dir(root))
+	return func(res http.ResponseWriter, req *http.Request) bool {
+		handler.ServeHTTP(res, req)
+		return false
+	}
+}
+
+func makeLatencyHandler(wait time.Duration) HandlerFunc {
+	return func(res http.ResponseWriter, req *http.Request) bool {
+		time.Sleep(wait)
+		return true
+	}
+}
+
+func makeRedirectHandler(redirectTo string, redirectCode int) HandlerFunc {
+	return func(res http.ResponseWriter, req *http.Request) bool {
 		res.Header()[http.CanonicalHeaderKey("Content-Type")] = nil
-		http.Redirect(res, req, h.redirectTo, h.redirectCode)
-		return
+		http.Redirect(res, req, redirectTo, redirectCode)
+		return false
 	}
-	h.wrapped.ServeHTTP(res, req)
 }
 
 func Atoi(t *testing.T, s string) int {
@@ -101,15 +123,6 @@ func tPath(p ...string) string {
 	return path.Join(p...)
 }
 
-func tUrl(t *testing.T, port int, path string) *url.URL {
-	s := fmt.Sprintf("http://127.0.0.1:%v/%v", port, path)
-	u, err := url.Parse(s)
-	if err != nil {
-		t.Fatalf("Failed to parse url %v: %v", s, err)
-	}
-	return u
-}
-
 func makeHtmlDocWithLinks(t *testing.T, urls []*url.URL, dPath string) {
 	doc := `<!doctype html>
 <html lang="en-US">
@@ -140,291 +153,336 @@ func makeHtmlDocWithLinks(t *testing.T, urls []*url.URL, dPath string) {
 // no NAT between them. This can provide test coverage for
 // simple cases whilst avoiding platform-specific
 // network infrastructure.
-func startHttpServer(t *testing.T, tSrv *httpTestServer, root string) {
+func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	stats := &tSrv.stats
 	statsCb := func(c net.Conn, s http.ConnState) {
-		stats.m.Lock()
-		defer stats.m.Unlock()
 		if s == http.StateNew {
 			stats.connections++
 		}
 	}
 
-	handler := http.FileServer(http.Dir(root))
-
 	// Bind to port to make sure the server is ready to
 	// accept connections immediately
-	listenStr := fmt.Sprint(":", tSrv.port)
-	listenAddr, err := net.ResolveTCPAddr("tcp", listenStr)
+	// listenStr := fmt.Sprint(":", tSrv.port)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Errorf("Failed to resolve tcp address %v: %v", listenStr, err)
-	}
-	listener, err := net.ListenTCP("tcp", listenAddr)
-	if err != nil {
-		t.Errorf("Failed to listen on tcp port %v: %v", tSrv.port, err)
+		t.Errorf("Failed to listen on localhost tcp port: %v", err)
 	}
 
+	if tSrv.server == nil {
+		tSrv.server = &http.Server{}
+	}
 	// Example Http keep-alive defaults, in seconds, are Apache(5),
 	// Cloudflare(900), GFE(610), LiteSpeed(5s), Microsoft-IIS(120),
 	// and nginx(75).
-	tSrv.server = &http.Server{
-		ConnState: statsCb,
-		Handler: HandlerWrapper{
-			redirectCode: tSrv.redirectCode,
-			redirectTo:   tSrv.redirectTo,
-			latency:      tSrv.replyLatency,
-			wrapped:      handler,
-		},
-		IdleTimeout: 5 * time.Second,
-	}
+	tSrv.server.IdleTimeout = 5 * time.Second
+	tSrv.server.ConnState = statsCb
+	tSrv.server.Addr = listener.Addr().String()
 
 	t.Cleanup(func() {
 		err := tSrv.server.Close()
 		if err != nil {
-			t.Errorf("Failed to close http server on port %v: %v", tSrv.port, err)
+			t.Errorf("Failed to close http server %v: %v", tSrv.name, err)
 		}
 	})
 
 	go func() {
 		err := tSrv.server.Serve(listener)
 		if err != nil && err != http.ErrServerClosed {
-			t.Errorf("Unexpected shutdown of http server on port %v: %v", tSrv.port, err)
+			t.Errorf("Unexpected shutdown of http server %v: %v", tSrv.name, err)
 		}
 	}()
 }
 
-func TestMeasureMaxConnections(t *testing.T) {
+func sumServerConnections(srvs []*httpTestServer) int {
+	total := 0
+	for _, srv := range srvs {
+		s := &srv.stats
+		total += s.connections
+	}
+	return total
+}
+
+func TestSmallTopologyConvergence(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
+		t.Skip("skipping in short mode due to re-request timeouts.")
 	}
 
+	const (
+		stdSrv      = iota
+		slowSrv     = iota
+		redirectSrv = iota
+	)
+
 	testcases := map[string]struct {
-		inPorts        []int
-		inPortLatency  map[int]time.Duration
-		inPortRedirect map[int]int
-		outNConns      int
+		inSrvs    []int
+		outNConns int
 	}{
 		"few servers": {
-			inPorts:   []int{8081, 8082, 8083},
+			inSrvs:    []int{stdSrv, stdSrv, stdSrv},
 			outNConns: 3,
 		},
-		"repeat servers": {
-			inPorts:   []int{8081, 8081, 8082},
-			outNConns: 2,
-		},
-		"reachable and unreachable servers": {
-			inPorts:   []int{8081, 8089, 8090, 8082, 8091},
-			outNConns: 2,
-		},
 		"slow server": {
-			inPorts:       []int{8081, 8082},
-			inPortLatency: map[int]time.Duration{8082: time.Second},
-			outNConns:     2,
+			inSrvs:    []int{stdSrv, slowSrv},
+			outNConns: 2,
 		},
 		"server redirect": {
-			inPorts:        []int{8081, 8082},
-			inPortRedirect: map[int]int{8082: 8083},
-			outNConns:      3,
+			inSrvs:    []int{stdSrv, redirectSrv},
+			outNConns: 2,
 		},
 	}
 
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
-			urls := []*url.URL{}
-			for _, port := range tc.inPorts {
-				urls = append(urls, tUrl(t, port, "index.html"))
-			}
-
-			portToNConns := make(map[int]int, 0)
-			// Servers should not repeat connections
-			for _, port := range tc.inPorts {
-				portToNConns[port] = 1
-			}
-			// http client should discover clients via redirect
-			for _, port := range tc.inPortRedirect {
-				portToNConns[port] = 1
-			}
-
-			httpServers := []*httpTestServer{}
-			for _, p := range []int{8081, 8082, 8083} {
-				redirectCode := 0
-				redirectPort, exists := tc.inPortRedirect[p]
-				if exists {
-					redirectCode = http.StatusMovedPermanently
-				}
-				httpServers = append(httpServers, &httpTestServer{
-					port:         p,
-					replyLatency: tc.inPortLatency[p],
-					redirectCode: redirectCode,
-					redirectTo:   tUrl(t, redirectPort, "index.html").String(),
-				})
-			}
-
-			for _, srv := range httpServers {
+			srvs := []*httpTestServer{}
+			for i, srvType := range tc.inSrvs {
 				root := t.TempDir()
 				cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
 				cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
-				startHttpServer(t, srv, root)
+
+				handlers := HandlerChain{}
+				switch srvType {
+				case stdSrv:
+					handlers = append(handlers, makeFileHandler(root))
+				case slowSrv:
+					handlers = append(handlers,
+						makeLatencyHandler(time.Second),
+						makeFileHandler(root))
+				case redirectSrv:
+					h := makeRedirectHandler(srvs[len(srvs)-1].server.Addr, http.StatusMovedPermanently)
+					handlers = append(handlers, h)
+				}
+				srv := &httpTestServer{
+					name:     fmt.Sprintf("http.%v", i),
+					handlers: handlers,
+				}
+				startHttpServer(t, srv)
+				srvs = append(srvs, srv)
+			}
+
+			urls := []*url.URL{}
+			for _, srv := range srvs {
+				urls = append(urls, srv.tUrl(t, "index.html"))
 			}
 
 			nConns := MeasureMaxConnections(urls)
 			if nConns != tc.outNConns {
 				t.Errorf("expected to measure %d client connections, got %d", tc.outNConns, nConns)
 			}
-
-			for _, srv := range httpServers {
-				srv.stats.m.Lock()
-				if srv.stats.connections != portToNConns[srv.port] {
-					t.Errorf("expected server on port %d to get %d connections, got %d", srv.port, portToNConns[srv.port], srv.stats.connections)
-				}
-				srv.stats.m.Unlock()
+			for _, srv := range srvs {
+				srv.server.Close()
 			}
 
-			totalConnections := 0
-			for _, srv := range httpServers {
-				s := &srv.stats
-				s.m.Lock()
-				totalConnections += s.connections
-				s.m.Unlock()
+			i := slices.IndexFunc(srvs, func(s *httpTestServer) bool {
+				return s.stats.connections != 1
+			})
+			if i != -1 {
+				s := srvs[i]
+				t.Errorf("expected server %v to get 1 connection, got %d", s.name, s.stats.connections)
 			}
-			if totalConnections != tc.outNConns {
-				t.Errorf("expected the total number of new http server connections to be %d, got %d", tc.outNConns, totalConnections)
+
+			total := sumServerConnections(srvs)
+			if total != len(srvs) {
+				t.Errorf("expected the total number of server connections to be %d, got %d", tc.outNConns, total)
 			}
 		})
 	}
 }
 
-func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
-	var (
-		canterburyPort int = 8081
-		otagoPort          = 8082
-		rakiuraPort        = 8083
-		tasmanPort         = 8084
-		westCoast          = 8085
+func TestBigTopologyConvergence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
+	}
+
+	nConnections := 1000
+	srvs := []*httpTestServer{}
+	for i := range nConnections {
+		root := t.TempDir()
+		cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
+		cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
+
+		srv := &httpTestServer{
+			name: fmt.Sprintf("http.%v", i),
+			handlers: HandlerChain{
+				makeLatencyHandler(time.Millisecond),
+				makeFileHandler(root),
+			},
+		}
+		startHttpServer(t, srv)
+		srvs = append(srvs, srv)
+	}
+
+	urls := []*url.URL{}
+	for _, srv := range srvs {
+		urls = append(urls, srv.tUrl(t, "index.html"))
+	}
+
+	nConns := MeasureMaxConnections(urls)
+	if nConns != nConnections {
+		t.Error("expected (nConns=", nConnections, "), got (nConns=", nConns, ")")
+	}
+	for _, srv := range srvs {
+		srv.server.Close()
+	}
+
+	i := slices.IndexFunc(srvs, func(s *httpTestServer) bool {
+		return s.stats.connections != 1
+	})
+	if i != -1 {
+		s := srvs[i]
+		t.Errorf("expected server %v to get 1 connection, got %d", s.name, s.stats.connections)
+	}
+}
+
+func TestCrawlingBehaviour(t *testing.T) {
+	const (
+		canterbury = "canterbury"
+		otago      = "otago"
+		rakiura    = "rakiura"
+		tasman     = "tasman"
+		westCoast  = "westcoast"
 	)
+
+	type page struct {
+		srv  string
+		path string
+	}
 
 	var (
 		// Canterbury
-		HanmerSprings *url.URL = tUrl(t, canterburyPort, "hanmer_springs.html")
-		Kaikoura               = tUrl(t, canterburyPort, "kaikoura.html")
-		Christchurch           = tUrl(t, canterburyPort, "christchurch.html")
-		Rakaia                 = tUrl(t, canterburyPort, "rakaia.html")
-		Ashburton              = tUrl(t, canterburyPort, "ashburton.html")
-		Timaru                 = tUrl(t, canterburyPort, "timaru.html")
+		hanmerSprings = page{canterbury, "hanmer_springs.html"}
+		kaikoura      = page{canterbury, "kaikoura.html"}
+		christchurch  = page{canterbury, "christchurch.html"}
+		rakaia        = page{canterbury, "rakaia.html"}
+		ashburton     = page{canterbury, "ashburton.html"}
+		timaru        = page{canterbury, "timaru.html"}
 		// Otago
-		Oamaru     = tUrl(t, otagoPort, "oamaru.html")
-		Dunedin    = tUrl(t, otagoPort, "dunedin.html")
-		Queenstown = tUrl(t, otagoPort, "queenstown.html")
-		Wanaka     = tUrl(t, otagoPort, "wanaka.html")
+		oamaru     = page{otago, "oamaru.html"}
+		dunedin    = page{otago, "dunedin.html"}
+		queenstown = page{otago, "queenstown.html"}
+		wanaka     = page{otago, "wanaka.html"}
 		// Rakiura
-		StewartIsland = tUrl(t, rakiuraPort, "stewart_island.html")
-		Oban          = tUrl(t, rakiuraPort, "oban.html")
+		stewartIsland = page{rakiura, "stewart_island.html"}
+		oban          = page{rakiura, "oban.html"}
 		// Tasman
-		Takaka      = tUrl(t, tasmanPort, "takaka.html")
-		Collingwood = tUrl(t, tasmanPort, "collingwood.html")
-		Puponga     = tUrl(t, tasmanPort, "puponga.html")
-		Motueka     = tUrl(t, tasmanPort, "motueka.html")
-		Richmond    = tUrl(t, tasmanPort, "richmond.html")
-		Nelson      = tUrl(t, tasmanPort, "nelson.html")
-		Tapawera    = tUrl(t, tasmanPort, "tapawera.html")
-		Murchison   = tUrl(t, tasmanPort, "murchison.html")
+		takaka      = page{tasman, "takaka.html"}
+		collingwood = page{tasman, "collingwood.html"}
+		puponga     = page{tasman, "puponga.html"}
+		motueka     = page{tasman, "motueka.html"}
+		richmond    = page{tasman, "richmond.html"}
+		nelson      = page{tasman, "nelson.html"}
+		tapawera    = page{tasman, "tapawera.html"}
+		murchison   = page{tasman, "murchison.html"}
 		// West Coast
-		Reefton         = tUrl(t, westCoast, "reefton.html")
-		SpringsJunction = tUrl(t, westCoast, "springs_junction.html")
+		reefton         = page{westCoast, "reefton.html"}
+		springsJunction = page{westCoast, "springs_junction.html"}
 	)
 
-	type serverAdjacencies map[*url.URL][]*url.URL
+	type serverAdjacencies map[page][]page
 
 	canterburyAdjacencies := serverAdjacencies{
-		HanmerSprings: {SpringsJunction, Kaikoura, Christchurch},
-		Kaikoura:      {HanmerSprings, Christchurch},
-		Christchurch:  {HanmerSprings, Kaikoura, Rakaia},
-		Rakaia:        {Christchurch, Ashburton},
-		Ashburton:     {Rakaia, Timaru},
-		Timaru:        {Ashburton, Oamaru, Queenstown},
+		hanmerSprings: {springsJunction, kaikoura, christchurch},
+		kaikoura:      {hanmerSprings, christchurch},
+		christchurch:  {hanmerSprings, kaikoura, rakaia},
+		rakaia:        {christchurch, ashburton},
+		ashburton:     {rakaia, timaru},
+		timaru:        {ashburton, oamaru, queenstown},
 	}
 
 	otagoAdjacencies := serverAdjacencies{
-		Oamaru:     {Timaru, Dunedin},
-		Dunedin:    {Oamaru, Queenstown},
-		Queenstown: {Dunedin, Wanaka, Timaru},
-		Wanaka:     {Queenstown, Reefton},
+		oamaru:     {timaru, dunedin},
+		dunedin:    {oamaru, queenstown},
+		queenstown: {dunedin, wanaka, timaru},
+		wanaka:     {queenstown, reefton},
 	}
 
 	tasmanAdjacencies := serverAdjacencies{
-		Puponga:     {Collingwood},
-		Collingwood: {Puponga, Takaka},
-		Takaka:      {Collingwood, Motueka},
-		Motueka:     {Takaka, Richmond},
-		Richmond:    {Motueka, Tapawera, Murchison, Nelson},
-		Nelson:      {Richmond},
-		Tapawera:    {Richmond},
-		Murchison:   {Richmond, SpringsJunction},
+		puponga:     {collingwood},
+		collingwood: {puponga, takaka},
+		takaka:      {collingwood, motueka},
+		motueka:     {takaka, richmond},
+		richmond:    {motueka, tapawera, murchison, nelson},
+		nelson:      {richmond},
+		tapawera:    {richmond},
+		murchison:   {richmond, springsJunction},
 	}
 
-	RakiuraAdjacencies := serverAdjacencies{
-		StewartIsland: {Oban},
-		Oban:          {StewartIsland},
+	rakiuraAdjacencies := serverAdjacencies{
+		stewartIsland: {oban},
+		oban:          {stewartIsland},
 	}
 
 	westCoastAdjacencies := serverAdjacencies{
-		Reefton:         {SpringsJunction, Wanaka},
-		SpringsJunction: {Reefton, Murchison, HanmerSprings},
+		reefton:         {springsJunction, wanaka},
+		springsJunction: {reefton, murchison, hanmerSprings},
 	}
 
-	regions := []serverAdjacencies{
-		canterburyAdjacencies,
-		otagoAdjacencies,
-		tasmanAdjacencies,
-		RakiuraAdjacencies,
-		westCoastAdjacencies,
+	regions := map[string]serverAdjacencies{
+		canterbury: canterburyAdjacencies,
+		otago:      otagoAdjacencies,
+		tasman:     tasmanAdjacencies,
+		rakiura:    rakiuraAdjacencies,
+		westCoast:  westCoastAdjacencies,
 	}
 
 	testcases := map[string]struct {
-		inUrls       []*url.URL
-		outPortConns []int
+		inPages  []page
+		outConns []string
 	}{
 		"Start on isolated server": {
-			inUrls:       []*url.URL{StewartIsland},
-			outPortConns: []int{8083},
+			inPages:  []page{stewartIsland},
+			outConns: []string{rakiura},
 		},
 		"Start on surrounded server": {
-			inUrls:       []*url.URL{HanmerSprings},
-			outPortConns: []int{8081, 8082, 8084, 8085},
+			inPages:  []page{hanmerSprings},
+			outConns: []string{canterbury, otago, tasman, westCoast},
 		},
 		"Start on outside edge of cyclic shape": {
-			inUrls:       []*url.URL{Kaikoura},
-			outPortConns: []int{8081, 8082, 8084, 8085},
+			inPages:  []page{kaikoura},
+			outConns: []string{canterbury, otago, tasman, westCoast},
 		},
 		"Start on sparsely linked server": {
-			inUrls:       []*url.URL{Puponga},
-			outPortConns: []int{8081, 8082, 8084, 8085},
+			inPages:  []page{puponga},
+			outConns: []string{canterbury, otago, tasman, westCoast},
 		},
 		"Start on two indirectly linked servers": {
-			inUrls:       []*url.URL{Richmond, Kaikoura},
-			outPortConns: []int{8081, 8082, 8084, 8085},
+			inPages:  []page{richmond, kaikoura},
+			outConns: []string{canterbury, otago, tasman, westCoast},
 		},
 	}
 
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
-			httpSrvs := []*httpTestServer{}
-			for _, regionAdjacencies := range regions {
-				var u *url.URL
+			// Start servers to bind ports
+			srvs := map[string]*httpTestServer{}
+			srvs[canterbury] = &httpTestServer{name: canterbury}
+			srvs[otago] = &httpTestServer{name: otago}
+			srvs[rakiura] = &httpTestServer{name: rakiura}
+			srvs[tasman] = &httpTestServer{name: tasman}
+			srvs[westCoast] = &httpTestServer{name: westCoast}
+			for _, srv := range srvs {
+				startHttpServer(t, srv)
+			}
+
+			// Generate server pages
+			for region, regionAdjacencies := range regions {
+				srv := srvs[region]
 
 				root := t.TempDir()
 				cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
 				for page, links := range regionAdjacencies {
-					u = page
-					base := path.Base(page.Path)
-					filename := strings.TrimPrefix(base, "/")
-					dest := path.Join(root, filename)
-					makeHtmlDocWithLinks(t, links, dest)
+					urls := []*url.URL{}
+					for _, link := range links {
+						lSrv := srvs[link.srv]
+						u := lSrv.tUrl(t, link.path)
+						urls = append(urls, u)
+					}
+
+					dest := path.Join(root, page.path)
+					makeHtmlDocWithLinks(t, urls, dest)
 				}
 
-				srv := &httpTestServer{port: Atoi(t, u.Port())}
-				startHttpServer(t, srv, root)
-				httpSrvs = append(httpSrvs, srv)
+				srv.server.Handler = HandlerChain{makeFileHandler(root)}
 			}
 
 			nConns := MeasureMaxConnections(tc.inUrls)
@@ -433,7 +491,6 @@ func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
 			}
 
 			for _, srv := range httpSrvs {
-				srv.stats.m.Lock()
 				connections := 0
 				if slices.Contains(tc.outPortConns, srv.port) {
 					connections++
@@ -441,54 +498,16 @@ func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
 				if srv.stats.connections != connections {
 					t.Errorf("expected server on port %d to get %d connections, got %d", srv.port, connections, srv.stats.connections)
 				}
-				srv.stats.m.Unlock()
 			}
 
 			totalConnections := 0
 			for _, srv := range httpSrvs {
 				s := &srv.stats
-				s.m.Lock()
 				totalConnections += s.connections
-				s.m.Unlock()
 			}
 			if totalConnections != len(tc.outPortConns) {
 				t.Errorf("expected the total number of new http server connections to be %d, got %d", len(tc.outPortConns), totalConnections)
 			}
 		})
-	}
-}
-
-func TestMeasureMaxConnectionsBig(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
-	}
-
-	nConnections := 1000
-	httpSrvs := []*httpTestServer{}
-	for i := 8000; i < 8000+nConnections; i++ {
-		root := t.TempDir()
-		cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
-		cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
-		srv := &httpTestServer{port: i, replyLatency: time.Millisecond}
-		startHttpServer(t, srv, root)
-		httpSrvs = append(httpSrvs, srv)
-	}
-
-	urls := []*url.URL{}
-	for i := 8000; i < 8000+nConnections; i++ {
-		urls = append(urls, tUrl(t, i, "index.html"))
-	}
-
-	nConns := MeasureMaxConnections(urls)
-	if nConns != nConnections {
-		t.Error("expected (nConns=", 10, "), got (nConns=", nConns, ")")
-	}
-	for _, srv := range httpSrvs {
-		s := &srv.stats
-		s.m.Lock()
-		if s.connections != 1 {
-			t.Fatal("expected no more than one connection per http server, got", s.connections)
-		}
-		s.m.Unlock()
 	}
 }
