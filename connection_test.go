@@ -193,9 +193,9 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer, root string) {
 	}()
 }
 
-func TestMeasureMaxConnections(t *testing.T) {
+func TestSmallTopologyConvergence(t *testing.T) {
 	if testing.Short() {
-		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
+		t.Skip("skipping due to re-request timeouts.")
 	}
 
 	testcases := map[string]struct {
@@ -294,7 +294,42 @@ func TestMeasureMaxConnections(t *testing.T) {
 	}
 }
 
-func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
+func TestBigTopologyConvergence(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping due to re-request timeouts.")
+	}
+
+	nConnections := 1000
+	httpSrvs := []*httpTestServer{}
+	for i := 8000; i < 8000+nConnections; i++ {
+		root := t.TempDir()
+		cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
+		cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
+		srv := &httpTestServer{port: i, replyLatency: time.Millisecond}
+		startHttpServer(t, srv, root)
+		httpSrvs = append(httpSrvs, srv)
+	}
+
+	urls := []*url.URL{}
+	for i := 8000; i < 8000+nConnections; i++ {
+		urls = append(urls, tUrl(t, i, "index.html"))
+	}
+
+	nConns := MeasureMaxConnections(urls)
+	if nConns != nConnections {
+		t.Error("expected (nConns=", 10, "), got (nConns=", nConns, ")")
+	}
+	for _, srv := range httpSrvs {
+		s := &srv.stats
+		s.m.Lock()
+		if s.connections != 1 {
+			t.Fatal("expected no more than one connection per http server, got", s.connections)
+		}
+		s.m.Unlock()
+	}
+}
+
+func TestCrawlingBehaviour(t *testing.T) {
 	var (
 		canterburyPort int = 8081
 		otagoPort          = 8082
@@ -455,40 +490,5 @@ func TestMeasureMaxConnectionsCrawlingBehaviour(t *testing.T) {
 				t.Errorf("expected the total number of new http server connections to be %d, got %d", len(tc.outPortConns), totalConnections)
 			}
 		})
-	}
-}
-
-func TestMeasureMaxConnectionsBig(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping TestMeasureMaxConnections in short mode due to re-request timeouts.")
-	}
-
-	nConnections := 1000
-	httpSrvs := []*httpTestServer{}
-	for i := 8000; i < 8000+nConnections; i++ {
-		root := t.TempDir()
-		cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
-		cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
-		srv := &httpTestServer{port: i, replyLatency: time.Millisecond}
-		startHttpServer(t, srv, root)
-		httpSrvs = append(httpSrvs, srv)
-	}
-
-	urls := []*url.URL{}
-	for i := 8000; i < 8000+nConnections; i++ {
-		urls = append(urls, tUrl(t, i, "index.html"))
-	}
-
-	nConns := MeasureMaxConnections(urls)
-	if nConns != nConnections {
-		t.Error("expected (nConns=", 10, "), got (nConns=", nConns, ")")
-	}
-	for _, srv := range httpSrvs {
-		s := &srv.stats
-		s.m.Lock()
-		if s.connections != 1 {
-			t.Fatal("expected no more than one connection per http server, got", s.connections)
-		}
-		s.m.Unlock()
 	}
 }
