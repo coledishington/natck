@@ -11,6 +11,7 @@ import (
 	"path"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -127,6 +128,39 @@ func tPath(p ...string) string {
 	return path.Join(p...)
 }
 
+func makeServerRoot(t *testing.T, files ...string) string {
+	robots := []string{}
+	html := []string{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "robots.txt") {
+			robots = append(robots, f)
+		} else if strings.HasSuffix(f, ".html") {
+			html = append(html, f)
+		} else {
+			t.Fatal("makeServerRoot: unsupported file type:", f)
+		}
+	}
+
+	root := t.TempDir()
+
+	if len(robots) > 1 {
+		t.Fatal("makeServerRoot: more than one robots.txt:", robots)
+	}
+	if len(robots) == 0 {
+		// Default to very small Crawl-delay
+		robots = append(robots, tPath("wildcard_robots.txt"))
+	}
+	cpFile(t, robots[0], path.Join(root, "robots.txt"))
+
+	if len(html) > 0 {
+		cpFile(t, html[0], path.Join(root, "index.html"))
+	}
+	for _, f := range html {
+		cpFile(t, f, path.Join(root, path.Base(f)))
+	}
+	return root
+}
+
 func makeHtmlDocWithLinks(t *testing.T, urls []*url.URL, dPath string) {
 	doc := `<!doctype html>
 <html lang="en-US">
@@ -233,9 +267,7 @@ func TestSmallTopologyConvergence(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srvs := []*httpTestServer{}
 			for i, srvType := range tc.inSrvs {
-				root := t.TempDir()
-				cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
-				cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
+				root := makeServerRoot(t, tPath("no_links.html"))
 
 				handlers := HandlerChain{}
 				switch srvType {
@@ -301,9 +333,7 @@ func TestBigTopologyConvergence(t *testing.T) {
 	nConnections := 1000
 	srvs := []*httpTestServer{}
 	for i := range nConnections {
-		root := t.TempDir()
-		cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
-		cpFile(t, tPath("no_links.html"), path.Join(root, "index.html"))
+		root := makeServerRoot(t, tPath("no_links.html"))
 
 		srv := &httpTestServer{
 			name: fmt.Sprintf("http.%v", i),
@@ -472,8 +502,7 @@ func TestCrawlingBehaviour(t *testing.T) {
 			for region, regionAdjacencies := range regions {
 				srv := srvs[region]
 
-				root := t.TempDir()
-				cpFile(t, tPath("wildcard_robots.txt"), path.Join(root, "robots.txt"))
+				root := makeServerRoot(t)
 				for page, links := range regionAdjacencies {
 					urls := []*url.URL{}
 					for _, link := range links {
