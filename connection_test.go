@@ -368,6 +368,92 @@ func TestBigTopologyConvergence(t *testing.T) {
 	}
 }
 
+func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping due to re-request timeouts.")
+	}
+
+	testcases := map[string]struct {
+		inPreRun  func(t *testing.T, srvs []*httpTestServer)
+		outNConns int
+	}{
+		"no links": {
+			inPreRun: func(t *testing.T, srvs []*httpTestServer) {
+				srvs[0].server.Handler = HandlerChain{
+					makeFileHandler(makeServerRoot(t, tPath("no_links.html"))),
+				}
+			},
+			outNConns: 1,
+		},
+		"html link": {
+			inPreRun: func(t *testing.T, srvs []*httpTestServer) {
+				root := makeServerRoot(t)
+				u := srvs[1].tUrl(t, "index.html")
+				makeHtmlDocWithLinks(t, []*url.URL{u}, path.Join(root, "index.html"))
+				srvs[0].server.Handler = HandlerChain{
+					makeFileHandler(root),
+				}
+			},
+			outNConns: 2,
+		},
+		"redirect": {
+			inPreRun: func(t *testing.T, srvs []*httpTestServer) {
+				mux := http.NewServeMux()
+
+				// Ensure small Crawl-delay is read from robots.txt
+				// for a fast test
+				root := makeServerRoot(t)
+				mux.Handle("/robots.txt", HandlerChain{makeFileHandler(root)})
+
+				r := srvs[1].tUrl(t, "index.html").String()
+				h := makeRedirectHandler(r, http.StatusMovedPermanently)
+				mux.Handle("/", HandlerChain{h})
+
+				srvs[0].server.Handler = mux
+			},
+			outNConns: 2,
+		},
+	}
+
+	for name, tc := range testcases {
+		t.Run(name, func(t *testing.T) {
+			srvs := []*httpTestServer{}
+			for i := range 2 {
+				s := &httpTestServer{
+					name: fmt.Sprintf("http.%v", i),
+				}
+				startHttpServer(t, s)
+				srvs = append(srvs, s)
+			}
+
+			root := makeServerRoot(t, tPath("no_links.html"))
+			srvs[1].server.Handler = HandlerChain{makeFileHandler(root)}
+
+			tc.inPreRun(t, srvs)
+
+			urls := []*url.URL{srvs[0].tUrl(t, "index.html")}
+			nConns := MeasureMaxConnections(urls)
+			if nConns != tc.outNConns {
+				t.Errorf("expected to measure %d client connections, got %d", tc.outNConns, nConns)
+			}
+			for _, srv := range srvs {
+				srv.server.Close()
+			}
+
+			total := 0
+			for _, srv := range srvs {
+				s := &srv.stats
+				s.m.Lock()
+				total += s.connections
+				s.m.Unlock()
+			}
+			if total != tc.outNConns {
+				t.Errorf("expected the total number of server connections to be %d, got %d", tc.outNConns, total)
+			}
+		})
+	}
+}
+
 func TestCrawlingBehaviour(t *testing.T) {
 	const (
 		canterbury = "canterbury"
