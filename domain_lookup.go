@@ -2,6 +2,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"net/url"
@@ -13,7 +14,7 @@ type resolvedUrl struct {
 	addresses []netip.AddrPort
 }
 
-func lookupAddr(h *url.URL) *resolvedUrl {
+func lookupAddr(network string, h *url.URL) *resolvedUrl {
 	r := resolvedUrl{url: h}
 
 	portString := urlPort(h)
@@ -23,17 +24,14 @@ func lookupAddr(h *url.URL) *resolvedUrl {
 	}
 	p := uint16(p64)
 
-	addrs, err := net.LookupIP(r.url.Hostname())
+	resolver := net.DefaultResolver
+	addrs, err := resolver.LookupNetIP(context.Background(), network, r.url.Hostname())
 	if err != nil {
 		return &r
 	}
 
 	for i := range addrs {
-		addr, ok := netip.AddrFromSlice(addrs[i])
-		if !ok {
-			continue
-		}
-		addrport := netip.AddrPortFrom(addr, p)
+		addrport := netip.AddrPortFrom(addrs[i], p)
 		r.addresses = append(r.addresses, addrport)
 	}
 	return &r

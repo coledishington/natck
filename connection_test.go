@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -201,9 +202,15 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 		}
 	}
 
+	addrPort := "127.0.0.1:0"
+	if tSrv.server != nil && tSrv.server.Addr != "" {
+		addr := netip.MustParseAddr(tSrv.server.Addr)
+		addrPort = netip.AddrPortFrom(addr, 0).String()
+	}
+
 	// Bind to port to make sure the server is ready to
 	// accept connections immediately
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", addrPort)
 	if err != nil {
 		t.Errorf("failed to listen on localhost tcp port: %v", err)
 	}
@@ -374,8 +381,9 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 	}
 
 	testcases := map[string]struct {
-		inPreRun  func(t *testing.T, srvs []*httpTestServer) []*url.URL
-		outNConns int
+		inPreStart func(t *testing.T, srvs []*httpTestServer)
+		inPreRun   func(t *testing.T, srvs []*httpTestServer) []*url.URL
+		outNConns  int
 	}{
 		"no links": {
 			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
@@ -410,6 +418,19 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 			},
 			outNConns: 2,
 		},
+		"html link to IPv6 server": {
+			inPreStart: func(t *testing.T, srvs []*httpTestServer) {
+				srvs[1].server = &http.Server{Addr: "::1"}
+			},
+			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
+				root := makeServerRoot(t)
+				u := srvs[1].tUrl(t, "index.html")
+				makeHtmlDocWithLinks(t, []*url.URL{u}, path.Join(root, "index.html"))
+				srvs[0].server.Handler = HandlerChain{makeFileHandler(root)}
+				return []*url.URL{srvs[0].tUrl(t, "index.html")}
+			},
+			outNConns: 1,
+		},
 		"redirect": {
 			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
 				mux := http.NewServeMux()
@@ -437,8 +458,13 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 				s := &httpTestServer{
 					name: fmt.Sprintf("http.%v", i),
 				}
-				startHttpServer(t, s)
 				srvs = append(srvs, s)
+			}
+			if tc.inPreStart != nil {
+				tc.inPreStart(t, srvs)
+			}
+			for _, s := range srvs {
+				startHttpServer(t, s)
 			}
 
 			root := makeServerRoot(t, tPath("no_links.html"))

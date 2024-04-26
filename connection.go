@@ -289,9 +289,9 @@ func makeCrawlRequest(c *connection) *roundtrip {
 	}
 }
 
-func lookupAddrRequest(h *url.URL, resolvedAddr chan<- *resolvedUrl, cancel <-chan struct{}) {
+func lookupv4AddrRequest(h *url.URL, resolvedAddr chan<- *resolvedUrl, cancel <-chan struct{}) {
 	select {
-	case resolvedAddr <- lookupAddr(h):
+	case resolvedAddr <- lookupAddr("ip4", h):
 	case <-cancel:
 	}
 }
@@ -341,7 +341,9 @@ func MeasureMaxConnections(urls []*url.URL) int {
 		case lookupAddrSemC <- struct{}{}:
 			hUrl := pendingResolutions.pop()
 			go func() {
-				lookupAddrRequest(hUrl, lookupAddrReply, stopC)
+				// Only lookup IPv4 addresses. IPv6 addresses are
+				// not running out so no need for CGNAT.
+				lookupv4AddrRequest(hUrl, lookupAddrReply, stopC)
 				<-semC
 			}()
 		case h, ok := <-lookupAddrReply:
