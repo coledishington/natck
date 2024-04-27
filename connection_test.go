@@ -179,11 +179,9 @@ func makeServerRoot(t *testing.T, files ...string) string {
 	if len(robots) > 1 {
 		t.Fatal("makeServerRoot: more than one robots.txt:", robots)
 	}
-	if len(robots) == 0 {
-		// Default to very small Crawl-delay
-		robots = append(robots, tPath("wildcard_robots.txt"))
+	if len(robots) == 1 {
+		cpFile(t, robots[0], path.Join(root, "robots.txt"))
 	}
-	cpFile(t, robots[0], path.Join(root, "robots.txt"))
 
 	if len(html) > 0 {
 		cpFile(t, html[0], path.Join(root, "index.html"))
@@ -334,7 +332,7 @@ func TestSmallTopologyConvergence(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			srvs := []*httpTestServer{}
 			for i, srvType := range tc.inSrvs {
-				root := makeServerRoot(t, tPath("no_links.html"))
+				root := makeServerRoot(t, tPath("wildcard_robots.txt"), tPath("no_links.html"))
 
 				handlers := HandlerChain{}
 				switch srvType {
@@ -375,7 +373,7 @@ func TestBigTopologyConvergence(t *testing.T) {
 	nConnections := 1000
 	srvs := []*httpTestServer{}
 	for i := range nConnections {
-		root := makeServerRoot(t, tPath("no_links.html"))
+		root := makeServerRoot(t, tPath("wildcard_robots.txt"), tPath("no_links.html"))
 
 		srv := &httpTestServer{
 			name: fmt.Sprintf("http.%v", i),
@@ -404,7 +402,7 @@ func TestRequestCrawlDelay(t *testing.T) {
 	srv := &httpTestServer{name: "server"}
 	startHttpServer(t, srv)
 
-	root := makeServerRoot(t)
+	root := makeServerRoot(t, tPath("wildcard_robots.txt"))
 	blog := srv.tUrl(t, "blog.html")
 	makeHtmlDocWithLinks(t, []*url.URL{blog}, path.Join(root, "index.html"))
 	cpFile(t, tPath("no_links.html"), path.Join(root, "blog.html"))
@@ -447,6 +445,71 @@ func TestRequestCrawlDelay(t *testing.T) {
 			t.Errorf("expected rate-limiting of 500ms, got %v on %v", tPassed, r.path)
 		}
 	}
+}
+
+func TestRequestRateLimiting(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping due to re-request timeouts.")
+	}
+
+	srv := &httpTestServer{name: "server"}
+	startHttpServer(t, srv)
+
+	root := makeServerRoot(t)
+
+	// Set Crawl-delay slow enough to avoid requesting
+	// the second html before the HTTP 429 is served.
+	robotsTxt := *defaultRobotsTxtRecord.Clone()
+	robotsTxt.Rules["Crawl-delay"] = "0.5"
+	robotsPath := path.Join(root, "robots.txt")
+	makeRobotsTxt(t, []record{robotsTxt}, robotsPath)
+
+	blogs := []*url.URL{
+		srv.tUrl(t, "blog1.html"),
+		srv.tUrl(t, "blog2.html"),
+	}
+	makeHtmlDocWithLinks(t, blogs, path.Join(root, "index.html"))
+	cpFile(t, tPath("no_links.html"), path.Join(root, "blog1.html"))
+	cpFile(t, tPath("no_links.html"), path.Join(root, "blog2.html"))
+	fileHandler := func() HandlerFunc {
+		reply429Next := false
+		handler := http.FileServer(http.Dir(root))
+		return func(res http.ResponseWriter, req *http.Request) bool {
+			if reply429Next {
+				res.Header()[http.CanonicalHeaderKey("Retry-After")] = []string{"1"}
+				res.WriteHeader(429)
+			} else {
+				handler.ServeHTTP(res, req)
+			}
+			reply429Next = req.URL.Path == "/"
+			return false
+		}
+	}
+	srv.server.Handler = HandlerChain{
+		srv.makeRequestStatsHandler(),
+		fileHandler(),
+	}
+
+	urls := []*url.URL{srv.tUrl(t, "")}
+	srvs := []*httpTestServer{srv}
+	checkMaxConnections(t, urls, len(urls), srvs)
+
+	// Check connection was rate-limited after 429
+	srv.stats.m.Lock()
+	served_429 := false
+	ref := srv.stats.requests[0].received
+	for _, r := range srv.stats.requests[1:] {
+		tPassed := r.received.Sub(ref)
+		if served_429 && tPassed < time.Second {
+			t.Errorf("expected connection to be rate-limited to 1s, got %v on %v", tPassed, r.path)
+		} else if !served_429 && tPassed > 600*time.Millisecond {
+			t.Errorf("expected connection to be faster than 1s, got %v on %v", tPassed, r.path)
+		}
+		ref = r.received
+		if strings.Contains(r.path, "blog") {
+			served_429 = true
+		}
+	}
 	srv.stats.m.Unlock()
 }
 
@@ -462,8 +525,9 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 	}{
 		"no links": {
 			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
+				root := makeServerRoot(t, tPath("wildcard_robots.txt"), tPath("no_links.html"))
 				srvs[0].server.Handler = HandlerChain{
-					makeFileHandler(makeServerRoot(t, tPath("no_links.html"))),
+					makeFileHandler(root),
 				}
 				return []*url.URL{srvs[0].tUrl(t, "index.html")}
 			},
@@ -471,7 +535,7 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 		},
 		"html link": {
 			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
-				root := makeServerRoot(t)
+				root := makeServerRoot(t, tPath("wildcard_robots.txt"))
 				u := srvs[1].tUrl(t, "index.html")
 				makeHtmlDocWithLinks(t, []*url.URL{u}, path.Join(root, "index.html"))
 				srvs[0].server.Handler = HandlerChain{
@@ -483,7 +547,7 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 		},
 		"html link with no .html suffix": {
 			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
-				root := makeServerRoot(t)
+				root := makeServerRoot(t, tPath("wildcard_robots.txt"))
 				u := srvs[1].tUrl(t, "MainPage")
 				makeHtmlDocWithLinks(t, []*url.URL{u}, path.Join(root, "MainPage"))
 				srvs[0].server.Handler = HandlerChain{
@@ -498,7 +562,7 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 				srvs[1].server = &http.Server{Addr: "::1"}
 			},
 			inPreRun: func(t *testing.T, srvs []*httpTestServer) []*url.URL {
-				root := makeServerRoot(t)
+				root := makeServerRoot(t, tPath("wildcard_robots.txt"))
 				u := srvs[1].tUrl(t, "index.html")
 				makeHtmlDocWithLinks(t, []*url.URL{u}, path.Join(root, "index.html"))
 				srvs[0].server.Handler = HandlerChain{makeFileHandler(root)}
@@ -512,7 +576,7 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 
 				// Ensure small Crawl-delay is read from robots.txt
 				// for a fast test
-				root := makeServerRoot(t)
+				root := makeServerRoot(t, tPath("wildcard_robots.txt"))
 				mux.Handle("/robots.txt", HandlerChain{makeFileHandler(root)})
 
 				r := srvs[1].tUrl(t, "index.html").String()
@@ -542,7 +606,7 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 				startHttpServer(t, s)
 			}
 
-			root := makeServerRoot(t, tPath("no_links.html"))
+			root := makeServerRoot(t, tPath("wildcard_robots.txt"), tPath("no_links.html"))
 			srvs[1].server.Handler = HandlerChain{makeFileHandler(root)}
 
 			urls := tc.inPreRun(t, srvs)
@@ -686,7 +750,7 @@ func TestCrawlingBehaviour(t *testing.T) {
 			for region, regionAdjacencies := range regions {
 				srv := srvs[region]
 
-				root := makeServerRoot(t)
+				root := makeServerRoot(t, tPath("wildcard_robots.txt"))
 				for page, links := range regionAdjacencies {
 					urls := []*url.URL{}
 					for _, link := range links {

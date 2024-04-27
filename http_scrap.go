@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -70,6 +71,28 @@ func isResponseHtml(resp *http.Response) bool {
 	return strings.HasPrefix(ctype[0], "text/html;")
 }
 
+func parseHttp429Headers(headers http.Header) (time.Duration, bool) {
+	retryFields, found := headers["Retry-After"]
+	if !found || len(retryFields) == 0 {
+		return 0, false
+	}
+
+	retryS := retryFields[len(retryFields)-1]
+	retry, err := strconv.Atoi(retryS)
+	if err == nil {
+		return time.Duration(retry) * time.Second, true
+	}
+
+	pattern := "Mon, 02 01 2006 03:04:05 MST"
+	nextRetry, err := time.Parse(pattern, retryS)
+	if err == nil {
+		retry := time.Until(nextRetry)
+		return retry, true
+	}
+
+	return 0, false
+}
+
 func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
 	var resp *http.Response
 
@@ -82,6 +105,15 @@ func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
 	defer resp.Body.Close()
 
 	urls := []*url.URL{}
+
+	// Server requesting rate-limiting
+	if resp.StatusCode == 429 {
+		if retry, ok := parseHttp429Headers(resp.Header); ok {
+			r.crawlDelay = max(retry, r.crawlDelay)
+		} else {
+			r.crawlDelay += time.Second
+		}
+	}
 
 	// Add url from redirect if it belongs to the same server
 	location, err := resp.Location()
