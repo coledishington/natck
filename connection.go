@@ -312,17 +312,17 @@ func MeasureMaxConnections(urls []*url.URL) int {
 	workerLimit := 10000
 	semC := make(chan struct{}, workerLimit)
 
-	connectionIdCtr := uint(0)
-	pendingConns := []*connection{}
-	pendingResolutions := lookupQueue{}
-
 	urls = deleteDuplicateUrlsByHostPort(urls)
+	pendingResolutions := lookupQueue{}
 	for _, u := range urls {
 		pendingResolutions.put(u)
 	}
 
+	connectionIdCtr := uint(0)
 	repeatedDailFails := 0
-	activeConns := make([]*connection, 0)
+	pendingConns := []*connection{}
+	activeConns := []*connection{}
+	failedConns := []*connection{}
 	for {
 		var lookupAddrSemC chan<- struct{} = nil
 		var scrapRequestSemC chan<- struct{} = nil
@@ -407,6 +407,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			c.lastReply = reply.replyTs
 
 			if reply.err != nil {
+				failedConns = append(failedConns, activeConns[i])
 				activeConns = slices.Delete(activeConns, i, i+1)
 			}
 
@@ -418,6 +419,10 @@ func MeasureMaxConnections(urls []*url.URL) int {
 					continue
 				}
 				if i := indexConnectionByHostPort(pendingConns, u); i != -1 {
+					continue
+				}
+				if i := indexConnectionByHostPort(failedConns, u); i != -1 {
+					// Avoid consuming extra NAT translations on a bad server
 					continue
 				}
 				urlsToResolve = append(urlsToResolve, u)
