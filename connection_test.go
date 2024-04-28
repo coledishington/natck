@@ -241,6 +241,34 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 	}()
 }
 
+func checkMaxConnections(t *testing.T, urls []*url.URL, nConns int, srvs []*httpTestServer) {
+	measured := MeasureMaxConnections(urls)
+	if measured != nConns {
+		t.Errorf("expected to measure %d connections, got %d", measured, nConns)
+	}
+
+	for _, srv := range srvs {
+		s := &srv.stats
+		s.m.Lock()
+		sConns := s.connections
+		s.m.Unlock()
+		if sConns > 1 {
+			t.Errorf("no server should receive > 1 connection, %v got %d", srv.name, sConns)
+		}
+	}
+
+	total := 0
+	for _, srv := range srvs {
+		s := &srv.stats
+		s.m.Lock()
+		total += s.connections
+		s.m.Unlock()
+	}
+	if total != nConns {
+		t.Errorf("expected total server connections to be %d, got %d", nConns, total)
+	}
+}
+
 func TestSmallTopologyConvergence(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping due to re-request timeouts.")
@@ -302,32 +330,7 @@ func TestSmallTopologyConvergence(t *testing.T) {
 				urls = append(urls, srv.tUrl(t, "index.html"))
 			}
 
-			nConns := MeasureMaxConnections(urls)
-			if nConns != tc.outNConns {
-				t.Errorf("expected to measure %d client connections, got %d", tc.outNConns, nConns)
-			}
-			for _, srv := range srvs {
-				srv.server.Close()
-			}
-
-			i := slices.IndexFunc(srvs, func(s *httpTestServer) bool {
-				return s.stats.connections != 1
-			})
-			if i != -1 {
-				s := srvs[i]
-				t.Errorf("expected server %v to get 1 connection, got %d", s.name, s.stats.connections)
-			}
-
-			total := 0
-			for _, srv := range srvs {
-				s := &srv.stats
-				s.m.Lock()
-				total += s.connections
-				s.m.Unlock()
-			}
-			if total != len(srvs) {
-				t.Errorf("expected the total number of server connections to be %d, got %d", tc.outNConns, total)
-			}
+			checkMaxConnections(t, urls, tc.outNConns, srvs)
 		})
 	}
 }
@@ -358,21 +361,7 @@ func TestBigTopologyConvergence(t *testing.T) {
 		urls = append(urls, srv.tUrl(t, "index.html"))
 	}
 
-	nConns := MeasureMaxConnections(urls)
-	if nConns != nConnections {
-		t.Error("expected (nConns=", nConnections, "), got (nConns=", nConns, ")")
-	}
-	for _, srv := range srvs {
-		srv.server.Close()
-	}
-
-	i := slices.IndexFunc(srvs, func(s *httpTestServer) bool {
-		return s.stats.connections != 1
-	})
-	if i != -1 {
-		s := srvs[i]
-		t.Errorf("expected server %v to get 1 connection, got %d", s.name, s.stats.connections)
-	}
+	checkMaxConnections(t, urls, nConnections, srvs)
 }
 
 func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
@@ -472,24 +461,7 @@ func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
 
 			urls := tc.inPreRun(t, srvs)
 
-			nConns := MeasureMaxConnections(urls)
-			if nConns != tc.outNConns {
-				t.Errorf("expected to measure %d client connections, got %d", tc.outNConns, nConns)
-			}
-			for _, srv := range srvs {
-				srv.server.Close()
-			}
-
-			total := 0
-			for _, srv := range srvs {
-				s := &srv.stats
-				s.m.Lock()
-				total += s.connections
-				s.m.Unlock()
-			}
-			if total != tc.outNConns {
-				t.Errorf("expected the total number of server connections to be %d, got %d", tc.outNConns, total)
-			}
+			checkMaxConnections(t, urls, tc.outNConns, srvs)
 		})
 	}
 }
@@ -649,32 +621,23 @@ func TestCrawlingBehaviour(t *testing.T) {
 				urls = append(urls, srv.tUrl(t, page.path))
 			}
 
-			nConns := MeasureMaxConnections(urls)
-			if nConns != len(tc.outConns) {
-				t.Errorf("expected to measure %d client connections, got %d", len(tc.outConns), nConns)
+			srvsSlice := []*httpTestServer{}
+			for _, s := range srvs {
+				srvsSlice = append(srvsSlice, s)
 			}
+			checkMaxConnections(t, urls, len(tc.outConns), srvsSlice)
 
 			for _, srv := range srvs {
-				srv.stats.m.Lock()
 				connections := 0
 				if slices.Contains(tc.outConns, srv.name) {
 					connections++
 				}
+
+				srv.stats.m.Lock()
 				if srv.stats.connections != connections {
 					t.Errorf("expected server %v to get %d connections, got %d", srv.name, connections, srv.stats.connections)
 				}
 				srv.stats.m.Unlock()
-			}
-
-			totalConnections := 0
-			for _, srv := range srvs {
-				s := &srv.stats
-				s.m.Lock()
-				totalConnections += s.connections
-				s.m.Unlock()
-			}
-			if totalConnections != len(tc.outConns) {
-				t.Errorf("expected the total server connections to be %d, got %d", len(tc.outConns), totalConnections)
 			}
 		})
 	}
