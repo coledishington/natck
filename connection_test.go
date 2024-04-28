@@ -22,9 +22,16 @@ import (
 type HandlerFunc func(http.ResponseWriter, *http.Request) bool
 type HandlerChain []HandlerFunc
 
+type request struct {
+	requester netip.Addr
+	path      string
+	received  time.Time
+}
+
 type httpServerStats struct {
 	m           sync.Mutex
 	connections int
+	requests    []request
 }
 
 type httpTestServer struct {
@@ -43,6 +50,13 @@ func (h HandlerChain) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	}
 }
 
+func (s *httpServerStats) reset() {
+	s.m.Lock()
+	defer s.m.Unlock()
+	s.connections = 0
+	s.requests = []request{}
+}
+
 func (srv *httpTestServer) tUrl(t *testing.T, path string) *url.URL {
 	if srv.server.Addr == "" {
 		t.Fatalf("server %v has no addr yet", srv.name)
@@ -53,6 +67,24 @@ func (srv *httpTestServer) tUrl(t *testing.T, path string) *url.URL {
 		t.Fatalf("failed to parse url %v: %v", s, err)
 	}
 	return u
+}
+
+func (srv *httpTestServer) makeRequestStatsHandler() HandlerFunc {
+	stats := &srv.stats
+	return func(res http.ResponseWriter, req *http.Request) bool {
+		received := time.Now()
+		addrPort := netip.MustParseAddrPort(req.RemoteAddr)
+		r := request{
+			requester: addrPort.Addr(),
+			path:      req.URL.Path,
+			received:  received,
+		}
+
+		stats.m.Lock()
+		defer stats.m.Unlock()
+		stats.requests = append(stats.requests, r)
+		return true
+	}
 }
 
 func makeFileHandler(root string) HandlerFunc {
@@ -362,6 +394,60 @@ func TestBigTopologyConvergence(t *testing.T) {
 	}
 
 	checkMaxConnections(t, urls, nConnections, srvs)
+}
+
+func TestRequestCrawlDelay(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping due to re-request timeouts.")
+	}
+
+	srv := &httpTestServer{name: "server"}
+	startHttpServer(t, srv)
+
+	root := makeServerRoot(t)
+	blog := srv.tUrl(t, "blog.html")
+	makeHtmlDocWithLinks(t, []*url.URL{blog}, path.Join(root, "index.html"))
+	cpFile(t, tPath("no_links.html"), path.Join(root, "blog.html"))
+	srv.server.Handler = HandlerChain{
+		srv.makeRequestStatsHandler(),
+		makeFileHandler(root),
+	}
+
+	urls := []*url.URL{srv.tUrl(t, "")}
+	srvs := []*httpTestServer{srv}
+	checkMaxConnections(t, urls, len(urls), srvs)
+
+	srv.stats.m.Lock()
+	ref := srv.stats.requests[0].received
+	for _, r := range srv.stats.requests[1:] {
+		tPassed := r.received.Sub(ref)
+
+		// Make sure the testing system can fulfil a request much
+		// faster than every 500ms
+		if tPassed > 250*time.Millisecond {
+			t.Errorf("expected minor rate-limiting, got %v on %v", tPassed, r.path)
+		}
+	}
+	srv.stats.m.Unlock()
+
+	robotsPath := path.Join(root, "robots.txt")
+	os.Remove(robotsPath)
+	robotsTxt := *defaultRobotsTxtRecord.Clone()
+	robotsTxt.Rules["Crawl-delay"] = "0.5"
+	makeRobotsTxt(t, []record{robotsTxt}, robotsPath)
+
+	srv.stats.reset()
+	checkMaxConnections(t, urls, len(urls), srvs)
+
+	srv.stats.m.Lock()
+	ref = srv.stats.requests[0].received
+	for _, r := range srv.stats.requests[1:] {
+		tPassed := r.received.Sub(ref)
+		if tPassed < 500*time.Millisecond {
+			t.Errorf("expected rate-limiting of 500ms, got %v on %v", tPassed, r.path)
+		}
+	}
+	srv.stats.m.Unlock()
 }
 
 func TestCrawlingBehaviourOnSmallTopology(t *testing.T) {
