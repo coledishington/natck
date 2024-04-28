@@ -2,29 +2,33 @@ package main
 
 import (
 	"html/template"
-	"maps"
-	"reflect"
+	"path"
 	"slices"
 	"testing"
 	"time"
 )
 
+type rule struct {
+	Token, Value string
+}
+
 type record struct {
 	Agents []string
-	Rules  map[string]string
+	Rules  []rule
 }
 
 func (r *record) Clone() *record {
 	return &record{
 		Agents: slices.Clone(r.Agents),
-		Rules:  maps.Clone(r.Rules),
+		Rules:  slices.Clone(r.Rules),
 	}
 }
 
 var defaultRobotsTxtRecord = record{
 	Agents: []string{"*"},
-	Rules: map[string]string{
-		"Crawl-delay": "0.000001",
+	Rules: []rule{
+		{Token: ruleCrawlDelay, Value: "0.000001"},
+		{Token: ruleAllow, Value: "/"},
 	},
 }
 
@@ -34,8 +38,8 @@ func makeRobotsTxt(t *testing.T, records []record, dPath string) {
 	{{- range $agent := .Agents}}
 User-agent: {{$agent}}
 	{{- end}}
-	{{- range $token, $value := .Rules}}
-{{$token}}: {{$value}}
+	{{- range $rule := .Rules}}
+{{$rule.Token}}: {{$rule.Value}}
 	{{- end}}
 {{end}}`
 
@@ -49,29 +53,61 @@ User-agent: {{$agent}}
 }
 
 func TestScrapRobotsTxt(t *testing.T) {
+	root := t.TempDir()
+
+	mixedPath := path.Join(root, "mixed.txt")
+	makeRobotsTxt(t, []record{{
+		Agents: []string{"*"},
+		Rules: []rule{
+			{Token: ruleAllow, Value: "/tmp/a.html"},
+			{Token: ruleDisallow, Value: "/tmp/"},
+			{Token: ruleAllow, Value: "/"},
+		},
+	}}, mixedPath)
+
 	testcases := map[string]struct {
-		in  string
-		out map[string]string
+		in              string
+		outCrawlDelay   time.Duration
+		allowedPaths    []string
+		disallowedPaths []string
 	}{
 		"No wildcards": {
-			in:  "testdata/no_wildcard_robots.txt",
-			out: map[string]string{},
+			in:            "testdata/no_wildcard_robots.txt",
+			outCrawlDelay: 0,
+			allowedPaths:  []string{"/tmp", "/public"},
 		},
 		"Wildcard User-agent": {
-			in:  "testdata/wildcard_robots.txt",
-			out: map[string]string{"Crawl-delay": time.Microsecond.String()},
+			in:            "testdata/wildcard_robots.txt",
+			outCrawlDelay: time.Microsecond,
+			allowedPaths:  []string{"/tmp", "/public"},
+		},
+		"Mixed Allow & Disallow": {
+			in:              mixedPath,
+			outCrawlDelay:   0,
+			allowedPaths:    []string{"/tmp", "/tmp/a.html", "/public/index.html"},
+			disallowedPaths: []string{"/tmp/", "/tmp/b.html"},
 		},
 	}
 
 	for name, tc := range testcases {
 		t.Run(name, func(t *testing.T) {
-			out := map[string]string{}
-			if delay, found := scrapRobotsTxt(openFile(t, tc.in)); found {
-				out["Crawl-delay"] = delay.String()
+			txt := scrapRobotsTxt(openFile(t, tc.in))
+
+			delay, _ := txt.crawlDelay()
+			if delay != tc.outCrawlDelay {
+				t.Error("Parsed Crawl-delay is '", delay, "', should be '", tc.outCrawlDelay, "'")
 			}
 
-			if !reflect.DeepEqual(tc.out, out) {
-				t.Error("Failed to parse values: ", tc.out, " != ", out)
+			for _, p := range tc.allowedPaths {
+				if !txt.pathAllowed(p) {
+					t.Error("path ", p, ", should be allowed")
+				}
+			}
+
+			for _, p := range tc.disallowedPaths {
+				if txt.pathAllowed(p) {
+					t.Error("path ", p, ", should be disallowed")
+				}
 			}
 		})
 	}

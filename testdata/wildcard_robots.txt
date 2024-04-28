@@ -3,5 +3,5 @@ Disallow: /
 Crawl-delay: 10
 
 User-agent: *
-Disallow: /
+Allow: /
 Crawl-delay: 0.000001 # 1us

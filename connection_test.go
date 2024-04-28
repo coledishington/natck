@@ -431,7 +431,9 @@ func TestRequestCrawlDelay(t *testing.T) {
 	robotsPath := path.Join(root, "robots.txt")
 	os.Remove(robotsPath)
 	robotsTxt := *defaultRobotsTxtRecord.Clone()
-	robotsTxt.Rules["Crawl-delay"] = "0.5"
+	robotsTxt.Rules = []rule{
+		{Token: "Crawl-delay", Value: "0.5"},
+	}
 	makeRobotsTxt(t, []record{robotsTxt}, robotsPath)
 
 	srv.stats.reset()
@@ -460,7 +462,9 @@ func TestRequestRateLimiting(t *testing.T) {
 	// Set Crawl-delay slow enough to avoid requesting
 	// the second html before the HTTP 429 is served.
 	robotsTxt := *defaultRobotsTxtRecord.Clone()
-	robotsTxt.Rules["Crawl-delay"] = "0.5"
+	robotsTxt.Rules = []rule{
+		{Token: "Crawl-delay", Value: "0.5"},
+	}
 	robotsPath := path.Join(root, "robots.txt")
 	makeRobotsTxt(t, []record{robotsTxt}, robotsPath)
 

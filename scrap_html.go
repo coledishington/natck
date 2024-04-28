@@ -124,5 +124,6 @@ func ScrapHtml(host *url.URL, body io.Reader) []*url.URL {
 		urls = append(urls, nUrl)
 	}
 
+	io.ReadAll(body)
 	return urls
 }

@@ -20,7 +20,8 @@ type ctxAddrKey struct{}
 
 type relativeUrl struct {
 	// Url fragment is stripped before sending to servers.
-	path, query string
+	// rawPath is only set if different from path.
+	rawPath, path, rawQuery string
 }
 
 type connection struct {
@@ -31,6 +32,7 @@ type connection struct {
 	uncrawledUrls map[relativeUrl]bool
 	crawlingUrls  map[relativeUrl]bool
 	crawledUrls   map[relativeUrl]bool
+	robots        robotstxt
 	crawlDelay    time.Duration
 	lastRequest   time.Time
 	lastReply     time.Time
@@ -78,21 +80,31 @@ func urlPort(u *url.URL) string {
 	return schemeToPort[u.Scheme]
 }
 
-func urlToRelativeUrl(u *url.URL) relativeUrl {
-	p := u.RawPath
-	if p == "" {
-		p = u.Path
+func (r relativeUrl) getRawPath() string {
+	if r.rawPath != "" {
+		return r.rawPath
 	}
+	return r.path
+}
+
+func pathToRelativeUrl(path string) relativeUrl {
 	return relativeUrl{
-		path:  p,
-		query: u.RawQuery,
+		path: path,
+	}
+}
+
+func urlToRelativeUrl(u *url.URL) relativeUrl {
+	return relativeUrl{
+		rawPath:  u.RawPath,
+		path:     u.Path,
+		rawQuery: u.RawQuery,
 	}
 }
 
 func resolveRelativeUrl(b *url.URL, r relativeUrl) (*url.URL, error) {
 	path := r.path
-	if r.query != "" {
-		path = fmt.Sprintf("%v?%v", path, r.query)
+	if r.rawQuery != "" {
+		path = fmt.Sprintf("%v?%v", path, r.rawQuery)
 	}
 	rUrl, err := url.Parse(path)
 	if err != nil {
@@ -193,8 +205,8 @@ func makeConnection(addr netip.AddrPort, target *url.URL) *connection {
 		client: makeClient(),
 		url:    target,
 		uncrawledUrls: map[relativeUrl]bool{
-			{path: "/robots.txt"}:    true,
-			urlToRelativeUrl(target): true,
+			pathToRelativeUrl("/robots.txt"): true,
+			urlToRelativeUrl(target):         true,
 		},
 		crawlingUrls: map[relativeUrl]bool{},
 		crawledUrls:  map[relativeUrl]bool{},
@@ -236,10 +248,10 @@ func getNextConnection(pendingConns, activeConns []*connection, freeWorkers int)
 }
 
 func getNextUrlToCrawl(c *connection) *url.URL {
-	target := c.url
+	var target *url.URL
 
 	// Always visit robots.txt first
-	robots := relativeUrl{path: "/robots.txt"}
+	robots := pathToRelativeUrl("/robots.txt")
 	if _, found := c.uncrawledUrls[robots]; found {
 		var err error
 		if target, err = resolveRelativeUrl(c.url, robots); err == nil {
@@ -249,14 +261,36 @@ func getNextUrlToCrawl(c *connection) *url.URL {
 
 	for r := range c.uncrawledUrls {
 		var err error
+
+		if !c.robots.pathAllowed(r.getRawPath()) {
+			continue
+		}
+
 		target, err = resolveRelativeUrl(c.url, r)
 		if err != nil {
 			// Shouldn't be possible, try again next time
 			continue
 		}
-		break
+		return target
 	}
-	return target
+
+	// Randomise re-used crawled urls
+	for r := range c.crawledUrls {
+		var err error
+
+		if !c.robots.pathAllowed(r.getRawPath()) {
+			continue
+		}
+
+		target, err = resolveRelativeUrl(c.url, r)
+		if err != nil {
+			// Shouldn't be possible, try again next time
+			continue
+		}
+		return target
+	}
+
+	return c.url
 }
 
 func stealUrlsForConnections(connections []*connection, urls []*url.URL) []*url.URL {
@@ -267,7 +301,7 @@ func stealUrlsForConnections(connections []*connection, urls []*url.URL) []*url.
 			r := urlToRelativeUrl(u)
 			_, inCrawling := c.crawlingUrls[r]
 			_, inCrawled := c.crawledUrls[r]
-			if !inCrawling && !inCrawled {
+			if !inCrawling && !inCrawled && c.robots.pathAllowed(u.Path) {
 				c.uncrawledUrls[r] = true
 			}
 			continue
@@ -284,6 +318,7 @@ func makeCrawlRequest(c *connection) *roundtrip {
 		client:     c.client,
 		url:        target,
 		host:       c.host,
+		robots:     c.robots,
 		crawlDelay: c.crawlDelay,
 	}
 }
@@ -401,6 +436,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			rUrl := urlToRelativeUrl(reply.url)
 			delete(c.crawlingUrls, rUrl)
 			c.crawledUrls[rUrl] = true
+			c.robots = reply.robots
 			c.crawlDelay = reply.crawlDelay
 			c.lastRequest = reply.requestTs
 			c.lastReply = reply.replyTs
@@ -437,11 +473,6 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			break
 		}
 		if len(pendingConns) == 0 && len(pendingResolutions.urls) == 0 && len(semC) == 0 {
-			for _, c := range activeConns {
-				if len(c.uncrawledUrls)+len(c.crawlingUrls) > 0 {
-					break
-				}
-			}
 			haveMoreUrls := slices.ContainsFunc(activeConns, func(c *connection) bool {
 				return len(c.uncrawledUrls)+len(c.crawlingUrls) > 0
 			})

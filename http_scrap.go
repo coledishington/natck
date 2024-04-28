@@ -27,6 +27,7 @@ type roundtrip struct {
 	err         error
 	requestTs   time.Time
 	replyTs     time.Time
+	robots      robotstxt
 	scrapedUrls []*url.URL
 	crawlDelay  time.Duration
 }
@@ -122,8 +123,9 @@ func scrapConnection(ctx context.Context, r *roundtrip) *roundtrip {
 	}
 
 	if isReponseRobotstxt(resp) {
-		if crawlDelay, found := scrapRobotsTxt(resp.Body); found {
-			r.crawlDelay = crawlDelay
+		r.robots = scrapRobotsTxt(resp.Body)
+		if d, found := r.robots.crawlDelay(); found {
+			r.crawlDelay = d
 		}
 	} else if isResponseHtml(resp) {
 		sUrls := ScrapHtml(r.url, resp.Body)
