@@ -67,13 +67,13 @@ func (q *lookupQueue) pop() *url.URL {
 }
 
 func urlPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+
 	schemeToPort := map[string]string{
 		"http":  "80",
 		"https": "443",
-	}
-	port := u.Port()
-	if port != "" {
-		return port
 	}
 	return schemeToPort[u.Scheme]
 }
@@ -155,7 +155,7 @@ func indexConnectionByHostPort(conns []*connection, u *url.URL) int {
 func deleteDuplicateUrlsByHostPort(urls []*url.URL) []*url.URL {
 	uniqueUrls := []*url.URL{}
 	for _, u := range urls {
-		if i := indexUrlByHostPort(uniqueUrls, u); i != -1 {
+		if indexUrlByHostPort(uniqueUrls, u) != -1 {
 			continue
 		}
 		uniqueUrls = append(uniqueUrls, u)
@@ -242,8 +242,7 @@ func getNextUrlToCrawl(c *connection) *url.URL {
 	robots := relativeUrl{path: "/robots.txt"}
 	if _, found := c.uncrawledUrls[robots]; found {
 		var err error
-		target, err = resolveRelativeUrl(c.url, robots)
-		if err == nil {
+		if target, err = resolveRelativeUrl(c.url, robots); err == nil {
 			return target
 		}
 	}
@@ -319,7 +318,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 	}
 
 	connectionIdCtr := uint(0)
-	repeatedDailFails := 0
+	repeatedDialFails := 0
 	pendingConns := []*connection{}
 	activeConns := []*connection{}
 	failedConns := []*connection{}
@@ -393,9 +392,9 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			// Dial errors may signify the middleware NAT device has run out
 			// of ports for this client
 			if isDialError(reply.err) {
-				repeatedDailFails++
+				repeatedDialFails++
 			} else if len(c.crawledUrls) == 0 {
-				repeatedDailFails = 0
+				repeatedDialFails = 0
 			}
 
 			// Add new connections
@@ -415,13 +414,13 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			newUrls := stealUrlsForConnections(activeConns, reply.scrapedUrls)
 			urlsToResolve := []*url.URL{}
 			for _, u := range newUrls {
-				if i := indexUrlByHostPort(urlsToResolve, u); i != -1 {
+				if indexUrlByHostPort(urlsToResolve, u) != -1 {
 					continue
 				}
-				if i := indexConnectionByHostPort(pendingConns, u); i != -1 {
+				if indexConnectionByHostPort(pendingConns, u) != -1 {
 					continue
 				}
-				if i := indexConnectionByHostPort(failedConns, u); i != -1 {
+				if indexConnectionByHostPort(failedConns, u) != -1 {
 					// Avoid consuming extra NAT translations on a bad server
 					continue
 				}
@@ -432,7 +431,7 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			}
 		}
 
-		if repeatedDailFails >= 5 {
+		if repeatedDialFails >= 5 {
 			// Assume the NAT has exceeded the allowed connections
 			// after repeated dail failures.
 			break
