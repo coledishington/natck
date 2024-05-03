@@ -8,7 +8,7 @@ to avoid dropping or quick timeouts to get an accurate measurement.
 * Uses realistic "looking" http traffic.
 * Maximises the variability of crawled sites.
 * Dynamically discovers new hosts to crawl.
-* Avoids over-requesting servers.
+* Respects servers via robots.txt and HTTP 429 rate-limit.
 
 # Basic Usage
 
