@@ -274,7 +274,7 @@ func startHttpServer(t *testing.T, tSrv *httpTestServer) {
 func checkMaxConnections(t *testing.T, urls []*url.URL, nConns int, srvs []*httpTestServer) {
 	measured := MeasureMaxConnections(urls)
 	if measured != nConns {
-		t.Errorf("expected to measure %d connections, got %d", measured, nConns)
+		t.Errorf("expected to measure %d connections, got %d", nConns, measured)
 	}
 
 	for _, srv := range srvs {

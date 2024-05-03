@@ -11,12 +11,18 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"sync/atomic"
 	"time"
 )
 
 const reRequestInterval = 3500 * time.Millisecond
 
 type ctxAddrKey struct{}
+
+type crawlError struct {
+	opErr string
+	err   string
+}
 
 type relativeUrl struct {
 	// Url fragment is stripped before sending to servers.
@@ -43,6 +49,10 @@ type connection struct {
 // are already.
 type lookupQueue struct {
 	urls [][]*url.URL
+}
+
+func (e *crawlError) Error() string {
+	return fmt.Sprintf("crawling error during %v: %v", e.opErr, e.err)
 }
 
 func (q lookupQueue) peek() *url.URL {
@@ -176,6 +186,8 @@ func deleteDuplicateUrlsByHostPort(urls []*url.URL) []*url.URL {
 }
 
 func makeClient() *http.Client {
+	var dialed atomic.Bool
+
 	// Need a unique transport per http.Client to avoid re-using the same
 	// connections, otherwise the NAT count will be wrong.
 	// The transport should only have one connection that never times out.
@@ -184,6 +196,19 @@ func makeClient() *http.Client {
 	transport.MaxIdleConns = 1
 	transport.MaxConnsPerHost = 1
 	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		isFirstDial := dialed.CompareAndSwap(false, true)
+		if !isFirstDial {
+			err := &net.OpError{
+				Op:  "dial",
+				Net: network,
+				Err: &crawlError{
+					opErr: "dial",
+					err:   "Tried to re-dial on connection",
+				},
+			}
+			return nil, err
+		}
+
 		// Http clients should not resolve the address. Overriding the dial avoids having to
 		// override URL and TLS ServerName.
 		addrShouldUse := ctx.Value(ctxAddrKey{}).(netip.AddrPort)
@@ -427,8 +452,11 @@ func MeasureMaxConnections(urls []*url.URL) int {
 			// Dial errors may signify the middleware NAT device has run out
 			// of ports for this client
 			if isDialError(reply.err) {
-				repeatedDialFails++
-			} else if len(c.crawledUrls) == 0 {
+				var err *crawlError
+				if !errors.As(reply.err, &err) {
+					repeatedDialFails++
+				}
+			} else if reply.err == nil && len(c.crawledUrls) == 0 {
 				repeatedDialFails = 0
 			}
 
